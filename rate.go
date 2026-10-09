@@ -111,15 +111,14 @@ func (r Rate) valid() bool {
 // String formats r the way ParseRate reads it, e.g. 50/1m, 600/1h or 100/24h.
 // A malformed Rate is written as it was, and any other invalid one as 0.
 func (r Rate) String() string {
-	if r.Malformed != "" {
+	switch {
+	case r.valid():
+		return strconv.Itoa(r.Count) + "/" + formatWindow(r.Window)
+	case r.Malformed != "":
 		return r.Malformed
-	}
-
-	if !r.valid() {
+	default:
 		return "0"
 	}
-
-	return strconv.Itoa(r.Count) + "/" + formatWindow(r.Window)
 }
 
 func formatWindow(d time.Duration) string {

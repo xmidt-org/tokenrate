@@ -88,6 +88,7 @@ func TestRateString(t *testing.T) {
 		{rate: Rate{Count: 4, Window: 90 * time.Minute}, want: "4/1h30m"},
 		{rate: Rate{Count: 100, Window: 24 * time.Hour}, want: "100/24h"},
 		{rate: Rate{Count: 3, Window: 1500 * time.Millisecond}, want: "3/1.5s"},
+		{rate: Rate{Count: 5, Window: time.Second, Malformed: "five per second"}, want: "5/1s"},
 	}
 
 	for _, tc := range tests {
@@ -96,7 +97,7 @@ func TestRateString(t *testing.T) {
 			if !tc.rate.IsZero() {
 				parsed, err := ParseRate(tc.want)
 				require.NoError(t, err)
-				assert.Equal(t, tc.rate, parsed)
+				assert.Equal(t, Rate{Count: tc.rate.Count, Window: tc.rate.Window}, parsed)
 			}
 		})
 	}

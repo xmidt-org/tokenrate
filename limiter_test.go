@@ -587,6 +587,24 @@ func TestResolver(t *testing.T) {
 		assert.Zero(t, l.len())
 	})
 
+	t.Run("a legacy format made sense of", func(t *testing.T) {
+		l := newLimiter(t, newClock(), WithResolver(func(_ context.Context, _ string, provided []Rate) ([]Rate, error) {
+			for i, r := range provided {
+				if r.Malformed == "five per second" {
+					provided[i].Count, provided[i].Window = 5, time.Second // Malformed left set
+				}
+			}
+
+			return provided, nil
+		}))
+
+		d := l.Check(ctx, "abc", rateCaps("five per second", "5/1s"))
+		assert.True(t, d.Allowed)
+		assert.Equal(t, rates(t, "5/1s"), d.Limits, "the text is cleared, so both spellings are one rate")
+		assert.Len(t, d.Warnings, 1, "it is still warned about")
+		assert.Equal(t, 4, allowedCount(l, "abc", rateCaps("5/1s"), 10), "and share one allowance")
+	})
+
 	t.Run("zero refuses without denying", func(t *testing.T) {
 		l := newLimiter(t, newClock(), WithResolver(func(_ context.Context, _ string, provided []Rate) ([]Rate, error) {
 			return append(provided, Rate{}), nil

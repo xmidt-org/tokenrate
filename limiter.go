@@ -162,7 +162,9 @@ func (l *Limiter) Check(ctx context.Context, principal string, capabilities []st
 }
 
 // resolveRates asks the Resolver what rates the Token counts as carrying,
-// and checks that each is valid or zero.  Duplicates are dropped.
+// and checks that each is valid or zero.  Duplicates are dropped, and a valid
+// rate's Malformed text, if a Resolver made sense of it and left it there, so
+// the rate shares an allowance with the same rate written properly.
 func (l *Limiter) resolveRates(ctx context.Context, principal string, provided []Rate) ([]Rate, error) {
 	resolved, err := l.resolve(ctx, principal, provided)
 	if err != nil {
@@ -171,7 +173,10 @@ func (l *Limiter) resolveRates(ctx context.Context, principal string, provided [
 
 	var rates []Rate
 	for _, r := range resolved {
-		if !r.valid() && !r.IsZero() {
+		switch {
+		case r.valid():
+			r.Malformed = ""
+		case !r.IsZero():
 			return nil, fmt.Errorf("%w: %+v", ErrInvalidRate, r)
 		}
 
