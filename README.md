@@ -9,9 +9,8 @@ A library that rate limits Callers using the Rate Capabilities in their Tokens.
 
 [![Build Status](https://github.com/xmidt-org/tokenrate/actions/workflows/ci.yml/badge.svg)](https://github.com/xmidt-org/tokenrate/actions/workflows/ci.yml)
 [![codecov.io](http://codecov.io/github/xmidt-org/tokenrate/coverage.svg?branch=main)](http://codecov.io/github/xmidt-org/tokenrate?branch=main)
-[![Go Report Card](https://goreportcard.com/badge/github.com/xmidt-org/tokenrate)](https://goreportcard.com/report/github.com/xmidt-org/tokenrate)
 [![Apache V2 License](http://img.shields.io/badge/license-Apache%20V2-blue.svg)](https://github.com/xmidt-org/tokenrate/blob/main/LICENSE)
-[![GitHub Release](https://img.shields.io/github/release/xmidt-org/tokenrate.svg)](CHANGELOG.md)
+[![GitHub Release](https://img.shields.io/github/release/xmidt-org/tokenrate.svg)](https://github.com/xmidt-org/tokenrate/releases)
 [![GoDoc](https://pkg.go.dev/badge/github.com/xmidt-org/tokenrate)](https://pkg.go.dev/github.com/xmidt-org/tokenrate)
 
 ## Summary
