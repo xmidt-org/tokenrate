@@ -63,8 +63,15 @@ func TestParseRateMalformed(t *testing.T) {
 
 	for _, in := range tests {
 		t.Run(in, func(t *testing.T) {
-			_, err := ParseRate(in)
+			r, err := ParseRate(in)
 			assert.ErrorIs(t, err, ErrMalformedRate)
+			assert.Equal(t, Rate{Malformed: in}, r, "the text is kept")
+			assert.True(t, r.IsZero())
+			if in == "" {
+				assert.Equal(t, "0", r.String(), "nothing to show")
+			} else {
+				assert.Equal(t, in, r.String())
+			}
 		})
 	}
 }
@@ -102,12 +109,12 @@ func TestCompareRates(t *testing.T) {
 		return rate
 	}
 
-	in := []Rate{r("100/24h"), r("20/1s"), r("5/1m"), r("5/1s"), r("5/1s")}
-	want := []Rate{r("5/1s"), r("20/1s"), r("5/1m"), r("100/24h")}
+	in := []Rate{r("100/24h"), {Malformed: "b"}, r("20/1s"), r("5/1m"), {}, r("5/1s"), {Malformed: "a"}, r("5/1s")}
+	want := []Rate{{}, {Malformed: "a"}, {Malformed: "b"}, r("5/1s"), r("20/1s"), r("5/1m"), r("100/24h")}
 
 	got := addRates(nil, in...)
 	slices.SortFunc(got, compareRates)
-	assert.Equal(t, want, got, "shortest window first, then smallest count, no duplicates")
+	assert.Equal(t, want, got, "zero first, by text, then shortest window, then smallest count, no duplicates")
 	assert.Equal(t, want, addRates(got, r("5/1m")), "adding a held rate changes nothing")
 }
 
@@ -119,21 +126,23 @@ func TestInvalidRates(t *testing.T) {
 	tests := []struct {
 		name string
 		rate Rate
+		str  string
 	}{
-		{name: "zero", rate: Rate{}},
-		{name: "zero count", rate: Rate{Count: 0, Window: time.Second}},
-		{name: "negative count", rate: Rate{Count: -1, Window: time.Second}},
-		{name: "zero window", rate: Rate{Count: 10, Window: 0}},
-		{name: "negative window", rate: Rate{Count: 10, Window: -time.Second}},
-		{name: "both negative", rate: Rate{Count: -10, Window: -time.Second}},
+		{name: "zero", rate: Rate{}, str: "0"},
+		{name: "malformed", rate: Rate{Malformed: "ten/1s"}, str: "ten/1s"},
+		{name: "zero count", rate: Rate{Count: 0, Window: time.Second}, str: "0"},
+		{name: "negative count", rate: Rate{Count: -1, Window: time.Second}, str: "0"},
+		{name: "zero window", rate: Rate{Count: 10, Window: 0}, str: "0"},
+		{name: "negative window", rate: Rate{Count: 10, Window: -time.Second}, str: "0"},
+		{name: "both negative", rate: Rate{Count: -10, Window: -time.Second}, str: "0"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.False(t, tc.rate.valid())
-			assert.Equal(t, "0", tc.rate.String())
+			assert.Equal(t, tc.str, tc.rate.String())
 
-			// A Resolver may return the zero Rate, which refuses, but no
+			// A Resolver may return a zero Rate, which refuses, but no
 			// other invalid one.
 			l, err := New(WithPrefixes("p:"), WithResolver(func(context.Context, string, []Rate) ([]Rate, error) {
 				return []Rate{valid, tc.rate}, nil

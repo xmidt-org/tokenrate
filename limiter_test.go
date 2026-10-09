@@ -313,7 +313,7 @@ func TestMalformed(t *testing.T) {
 			d := l.Check(ctx, "abc", rateCaps("10/0s"))
 			assert.False(t, d.Allowed)
 			assert.Equal(t, RateExceeded, d.Reason)
-			assert.Equal(t, []Rate{{}}, d.Limits)
+			assert.Equal(t, []Rate{{Malformed: "10/0s"}}, d.Limits)
 			assert.True(t, d.Limit.IsZero())
 			assert.Zero(t, d.RetryAfter)
 			require.Len(t, d.Warnings, 1)
@@ -338,9 +338,17 @@ func TestMalformed(t *testing.T) {
 		d := l.Check(ctx, "abc", rateCaps("10/0s"))
 		assert.False(t, d.Allowed, "a broken Token is held to zero, whatever the Caller's other Tokens say")
 		assert.Equal(t, RateExceeded, d.Reason)
-		assert.Equal(t, []Rate{{}}, d.Limits)
+		assert.Equal(t, []Rate{{Malformed: "10/0s"}}, d.Limits)
 		assert.Len(t, d.Warnings, 1)
 		assert.Equal(t, 1, l.len(), "and does not disturb what is remembered")
+	})
+
+	t.Run("several malformed", func(t *testing.T) {
+		l := newLimiter(t, newClock())
+		d := l.Check(ctx, "abc", rateCaps("10/0s", "abc/1s", "10/0s"))
+		assert.False(t, d.Allowed)
+		assert.Equal(t, []Rate{{Malformed: "10/0s"}, {Malformed: "abc/1s"}}, d.Limits, "each text once, in order")
+		assert.Len(t, d.Warnings, 3, "but every capability is warned about")
 	})
 
 	t.Run("with a resolver that drops the zero", func(t *testing.T) {
@@ -467,8 +475,9 @@ func TestDefaultResolver(t *testing.T) {
 	}{
 		{name: "nothing", provided: nil, want: nil},
 		{name: "valid", provided: []Rate{five, ten}, want: []Rate{five, ten}},
-		{name: "malformed beside valid", provided: []Rate{five, {}, ten}, want: []Rate{five, ten}},
-		{name: "only malformed", provided: []Rate{{}}, want: []Rate{{}}},
+		{name: "malformed beside valid", provided: []Rate{five, {Malformed: "x"}, ten}, want: []Rate{five, ten}},
+		{name: "only malformed", provided: []Rate{{Malformed: "x"}, {Malformed: "y"}}, want: []Rate{{Malformed: "x"}, {Malformed: "y"}}},
+		{name: "zero", provided: []Rate{{}}, want: []Rate{{}}},
 	}
 
 	for _, tc := range tests {
@@ -496,7 +505,7 @@ func TestResolver(t *testing.T) {
 		d := l.Check(context.WithValue(ctx, ctxKey{}, "v"), "abc", rateCaps("10/0s", "100/1ms", "5/1s", "abc/1s"))
 		assert.True(t, d.Allowed)
 		assert.Equal(t, "abc", gotPrincipal)
-		assert.Equal(t, []Rate{{}, mustRate(t, "100000/1s"), mustRate(t, "5/1s")}, gotRates, "within the bounds, in Token order, malformed as zero once")
+		assert.Equal(t, []Rate{{Malformed: "10/0s"}, mustRate(t, "100000/1s"), mustRate(t, "5/1s"), {Malformed: "abc/1s"}}, gotRates, "within the bounds, in Token order, malformed as zero with its text")
 		assert.Equal(t, "v", gotValue)
 		assert.Equal(t, rates(t, "5/1s", "100000/1s"), d.Limits)
 		assert.Len(t, d.Warnings, 2)

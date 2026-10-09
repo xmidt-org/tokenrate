@@ -61,8 +61,9 @@ bascule's middleware.
 Given principal `p` and the Token's capability strings `t`:
 
 1. **Select** `t`'s capabilities that match a prefix, and parse each one.
-   Each malformed one emits a Capability Warning and contributes the zero
-   rate, once. Each valid one is rescaled into the Window Bounds.
+   Each malformed one emits a Capability Warning and contributes a zero
+   rate carrying the text as written. Each valid one is rescaled into the
+   Window Bounds. Duplicates are dropped.
 2. **Resolve:** call the Resolver (`DefaultResolver` unless replaced) with
    `p` and the rates from step 1, in Token order. Its result is what `t`
    counts as carrying from here on, and is trusted (no rescaling). If it
@@ -139,7 +140,7 @@ func WithClock(func() time.Time) Option               // for tests
 
 // Resolver decides what rates a Token counts as carrying.  Ceilings,
 // Overrides, requiring a rate and blocking a Caller are written here.
-// Malformed Capabilities arrive as the zero Rate.
+// Malformed Capabilities arrive as zero Rates carrying their text.
 type Resolver func(ctx context.Context, principal string, provided []Rate) ([]Rate, error)
 
 // DefaultResolver ignores malformed rates beside valid ones, and holds a
@@ -176,8 +177,12 @@ type Warning struct {
 }
 func (w Warning) String() string // e.g. `malformed; kind=rate; cap="prefix:rate:10/0s"`
 
-type Rate struct{ Count int; Window time.Duration }
-func ParseRate(string) (Rate, error) // same grammar as capabilities
+type Rate struct {
+	Count     int
+	Window    time.Duration
+	Malformed string // the rate as written, when it could not be parsed
+}
+func ParseRate(string) (Rate, error) // same grammar as capabilities; on error, a zero Rate with Malformed set
 ```
 
 The Resolver is fixed at construction, but it is a function, so what it
@@ -255,12 +260,14 @@ Behavior:
   both Tokens; their calls draw from the same allowances.
 - A cut: Token A `20/1s`, then Token B `2/1s` once → A is held to 2.
 - After 2× the window without presenting `20/1s`, it no longer applies.
-- Only a malformed rate → every call fails, with a warning and the zero
-  rate in `Limits`, even if the Caller's other Tokens are remembered.
+- Only malformed rates → every call fails, with a warning each and the
+  zero rates in `Limits`, each carrying its text, even if the Caller's
+  other Tokens are remembered.
 - A malformed rate alongside a valid one → the valid one applies, and a
   warning is still emitted.
 - `DefaultResolver`: nothing → nothing; zero beside valid → the valid
-  ones; only zero → zero; never an error; its input is not modified.
+  ones; only zeros → those zeros; never an error; its input is not
+  modified.
 - Window Bounds `1s` to `1h`: `100/1ms` → held as `100000/1s`; `100/2h` →
   held as `50/1h`, so only 50 calls burst; `5/1s` and `5/1h` → unchanged;
   an Override of `10/1ms` still applies. With the defaults, `100/1s` →

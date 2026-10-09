@@ -29,7 +29,7 @@ A configured string or regular expression that selects which **Capabilities** ar
 A **Capability** (e.g. `{prefix}50/1m`) stating how many calls a **Caller** may make per window against **one instance** of the service. Fleet-wide throughput is roughly that × the number of instances; issuers do that math.
 
 **Malformed Capability**:
-A **Rate Capability** whose rate cannot be parsed. It is warned about, and reaches the **Resolver** as the zero rate, which allows nothing. The default Resolver ignores it when the Token has valid rates and holds a Token whose rates are all malformed to zero, so a typo never means no limit; a deployment's own Resolver may decide otherwise.
+A **Rate Capability** whose rate cannot be parsed. It is warned about, and reaches the **Resolver** as a zero rate, which allows nothing, carrying the rate as written. The default Resolver ignores it when the Token has valid rates and holds a Token whose rates are all malformed to zero, so a typo never means no limit; a deployment's own Resolver may log the text, parse a format of its own, or decide otherwise.
 
 **Denied**:
 The **Resolver** returned an error, or an invalid rate, so the request is refused whatever the Token says. It is how a deployment requires a rate, blocks a Caller, or refuses anything else it decides to. The error is returned to the service to log, not shown to the Caller.

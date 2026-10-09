@@ -65,13 +65,13 @@ func WithPrefixes(prefixes ...string) Option {
 // A Resolver has the final say over the rates a Token counts as carrying.  It
 // is called on every check, outside any lock, with the request's context, the
 // Token's principal and the rates of its Rate Capabilities, in Token order
-// and held within the Window Bounds.  A Malformed Capability arrives as the
-// zero Rate, which allows nothing; it appears at most once.
+// and held within the Window Bounds.  A Malformed Capability arrives as a
+// zero Rate, which allows nothing, with the rate as written in Malformed.
 //
 // Whatever the Resolver returns is used instead, as if the Token had carried
 // those rates: they are remembered for the Caller, and they are trusted, so
 // the Window Bounds do not apply.  Returning no rates leaves the Token
-// Unrestricted.  Returning the zero Rate refuses the request as RateExceeded,
+// Unrestricted.  Returning a zero Rate refuses the request as RateExceeded,
 // with nothing remembered.  Returning an error denies the request, whatever
 // the reason: the error is returned in the Decision for the service to log,
 // and is not shown to the Caller.
@@ -92,16 +92,12 @@ type Resolver func(ctx context.Context, principal string, provided []Rate) ([]Ra
 // DefaultResolver is the Resolver unless WithResolver says otherwise.  It
 // ignores a Malformed Capability when the Token has valid rates, so a typo
 // in one rate doesn't void the others, and holds a Token whose rates are all
-// malformed to the zero Rate, so a typo never means no limit.  It never
+// malformed to those zero Rates, so a typo never means no limit.  It never
 // returns an error.
 func DefaultResolver(_ context.Context, _ string, provided []Rate) ([]Rate, error) {
-	if len(provided) == 0 {
-		return nil, nil
-	}
-
 	valid := slices.DeleteFunc(slices.Clone(provided), Rate.IsZero)
 	if len(valid) == 0 {
-		return []Rate{{}}, nil
+		return provided, nil
 	}
 
 	return valid, nil

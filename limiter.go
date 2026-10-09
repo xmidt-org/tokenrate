@@ -137,9 +137,9 @@ func (l *Limiter) Check(ctx context.Context, principal string, capabilities []st
 		return d
 	}
 
-	// One that counts as carrying the zero Rate allows nothing.  That is not
+	// One that counts as carrying a zero Rate allows nothing.  That is not
 	// worth remembering, so it creates no state.
-	if slices.Contains(token, Rate{}) {
+	if slices.ContainsFunc(token, Rate.IsZero) {
 		slices.SortFunc(token, compareRates)
 		d.Limits = token
 		d.Reason = RateExceeded
@@ -162,7 +162,7 @@ func (l *Limiter) Check(ctx context.Context, principal string, capabilities []st
 }
 
 // resolveRates asks the Resolver what rates the Token counts as carrying,
-// and checks that each is valid or zero.
+// and checks that each is valid or zero.  Duplicates are dropped.
 func (l *Limiter) resolveRates(ctx context.Context, principal string, provided []Rate) ([]Rate, error) {
 	resolved, err := l.resolve(ctx, principal, provided)
 	if err != nil {
@@ -183,7 +183,7 @@ func (l *Limiter) resolveRates(ctx context.Context, principal string, provided [
 
 // selectRates finds the capabilities that match a prefix and returns their
 // rates, held within the Window Bounds, in Token order.  Each malformed one
-// adds a warning and contributes the zero Rate, once.
+// adds a warning and contributes a zero Rate carrying its text.
 func (l *Limiter) selectRates(capabilities []string, warnings *[]Warning) (rates []Rate) {
 	for _, c := range capabilities {
 		for _, re := range l.prefixes {
@@ -192,12 +192,14 @@ func (l *Limiter) selectRates(capabilities []string, warnings *[]Warning) (rates
 				continue
 			}
 
-			if r, err := ParseRate(m[len(m)-1]); err != nil {
+			r, err := ParseRate(m[len(m)-1])
+			if err != nil {
 				*warnings = append(*warnings, malformedWarning(c))
-				rates = addRates(rates, Rate{})
 			} else {
-				rates = addRates(rates, l.bound(r))
+				r = l.bound(r)
 			}
+
+			rates = addRates(rates, r)
 
 			break
 		}
