@@ -26,8 +26,9 @@ type Extractor func(*http.Request) (principal string, capabilities []string)
 // For each request it checks the Caller and adds one WarningHeader per
 // Capability Warning, whether or not the request goes on.  An allowed request
 // is passed to the next handler.  A rejected one gets 429 Too Many Requests,
-// with Retry-After when waiting would help, or 403 Forbidden when a Rate
-// Capability is required and missing.
+// with Retry-After when waiting would help; 403 Forbidden when a Rate
+// Capability is required and missing; or 503 Service Unavailable when the
+// Resolver failed, which Observe can log from Decision.Err.
 type Middleware struct {
 	// Limiter decides each request.  Required.
 	Limiter *Limiter
@@ -62,7 +63,7 @@ func (m Middleware) Wrap(next http.Handler) http.Handler {
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		principal, capabilities := m.Extract(r)
-		d := m.Limiter.Check(principal, capabilities)
+		d := m.Limiter.Check(r.Context(), principal, capabilities)
 		if m.Observe != nil {
 			m.Observe(r, d)
 		}
@@ -80,6 +81,8 @@ func (m Middleware) Wrap(next http.Handler) http.Handler {
 			}
 
 			w.WriteHeader(http.StatusTooManyRequests)
+		case d.Reason == ResolverFailed:
+			w.WriteHeader(http.StatusServiceUnavailable)
 		default:
 			w.WriteHeader(http.StatusForbidden)
 		}

@@ -6,12 +6,14 @@
 //
 // tokenrate never sees the Token.  After authenticating a request, a service
 // passes its principal and capability strings to Limiter.Check, or lets
-// Middleware do so, and applies the Decision it gets back.  See CONTEXT.md
-// for the terms used here and docs/design.md for the behavior.
+// Middleware do so, and applies the Decision it gets back.  A Resolver lets
+// the service adjust the rates first, for ceilings, overrides and the like.
+// See CONTEXT.md for the terms used here and docs/design.md for the behavior.
 package tokenrate
 
 import (
 	"container/list"
+	"context"
 	"errors"
 	"fmt"
 	"hash/maphash"
@@ -33,24 +35,29 @@ const (
 	minCallersPerShard = 1024
 )
 
-// ErrNoPrefixes is returned by New when no Capability Prefix was configured.
-var ErrNoPrefixes = errors.New("at least one capability prefix is required")
+// Errors from New and Check.
+var (
+	// ErrNoPrefixes is returned by New when no Capability Prefix was
+	// configured.
+	ErrNoPrefixes = errors.New("at least one capability prefix is required")
+
+	// ErrInvalidRate is the Decision.Err when a Resolver returns a rate whose
+	// count or window is not positive.
+	ErrInvalidRate = errors.New("resolver returned an invalid rate")
+)
 
 // Limiter decides, for each request, whether its Caller is within their
 // Caller Rates.  It is safe for concurrent use.
 type Limiter struct {
-	prefixes          []*regexp.Regexp
-	rates             []Rate            // Configured Rates for every Caller
-	callerRates       map[string][]Rate // Configured Rates per Caller, merged with rates by New
-	overrides         map[string][]Rate
-	maxCallers        int
-	sweepInterval     time.Duration
-	minWindow         time.Duration
-	maxWindow         time.Duration
-	now               func() time.Time
-	required          bool
-	permissive        bool
-	limitUnrestricted bool
+	prefixes      []*regexp.Regexp
+	resolve       Resolver
+	maxCallers    int
+	sweepInterval time.Duration
+	minWindow     time.Duration
+	maxWindow     time.Duration
+	now           func() time.Time
+	required      bool
+	permissive    bool
 
 	seed   maphash.Seed
 	shards []*shard
@@ -63,8 +70,6 @@ type Limiter struct {
 // New creates a Limiter.  WithPrefixes is required.
 func New(opts ...Option) (*Limiter, error) {
 	l := Limiter{
-		callerRates:   make(map[string][]Rate),
-		overrides:     make(map[string][]Rate),
 		maxCallers:    DefaultMaxCallers,
 		sweepInterval: DefaultSweepInterval,
 		minWindow:     DefaultMinWindow,
@@ -92,14 +97,6 @@ func New(opts ...Option) (*Limiter, error) {
 		errs = append(errs, fmt.Errorf("min window %v exceeds max window %v", l.minWindow, l.maxWindow))
 	}
 
-	for principal, rates := range l.callerRates {
-		if _, ok := l.overrides[principal]; ok {
-			errs = append(errs, fmt.Errorf("%q has both rates and an override", principal))
-		}
-
-		l.callerRates[principal] = addRates(slices.Clone(l.rates), rates...)
-	}
-
 	if err := errors.Join(errs...); err != nil {
 		return nil, err
 	}
@@ -122,10 +119,33 @@ func New(opts ...Option) (*Limiter, error) {
 }
 
 // Check decides one request from principal, whose Token carries capabilities,
-// and spends one call from each of the Caller's allowances.
-func (l *Limiter) Check(principal string, capabilities []string) Decision {
+// and spends one call from each of the Caller's allowances.  ctx is passed to
+// the Resolver, if there is one.
+func (l *Limiter) Check(ctx context.Context, principal string, capabilities []string) Decision {
 	var d Decision
 	token, present := l.selectRates(capabilities, &d.Warnings)
+
+	if l.resolve != nil {
+		resolved, err := l.resolveRates(ctx, principal, token)
+		if err != nil {
+			d.Err = err
+			l.fail(&d, ResolverFailed)
+			return d
+		}
+
+		token = resolved
+		present = present || len(token) > 0
+	}
+
+	if !present {
+		if l.required {
+			l.fail(&d, NoRateCapability)
+		} else {
+			d.Allowed = true
+		}
+
+		return d
+	}
 
 	now := l.now()
 	s := l.shard(principal)
@@ -135,53 +155,50 @@ func (l *Limiter) Check(principal string, capabilities []string) Decision {
 
 	s.sweepOldest(now)
 
-	if override, ok := l.overrides[principal]; ok {
-		l.spend(s.get(principal, true), slices.Clone(override), now, &d)
-		return d
-	}
-
-	if !present {
-		if l.required {
-			l.fail(&d, NoRateCapability)
-			return d
-		}
-
-		if !l.limitUnrestricted {
-			d.Allowed = true
-			return d
-		}
-	}
-
-	// A Caller with nothing to remember and no Configured Rates gets no
-	// state, so a Token whose only rates are malformed creates none.
-	configured := l.configured(principal)
-	c := s.get(principal, len(token)+len(configured) > 0)
+	// A Caller with nothing to remember gets no state, so a Token whose only
+	// rates are malformed creates none.
+	c := s.get(principal, len(token) > 0)
 
 	var applied []Rate
 	if c != nil {
 		c.remember(token, now)
 		c.prune(now)
-		applied = c.applied(now, configured)
+		applied = c.applied(now)
 	}
 
+	// The Token counts as carrying rates, so leaving nothing to apply holds
+	// it to zero.
 	if len(applied) == 0 {
 		if c != nil && len(c.allowances) == 0 {
 			s.remove(c)
 		}
 
-		// A Token with Rate Capabilities that left nothing to apply is held
-		// to zero.  One without any is Unrestricted after all.
-		if present {
-			l.fail(&d, RateExceeded)
-		} else {
-			d.Allowed = true
-		}
-
+		l.fail(&d, RateExceeded)
 		return d
 	}
 
 	l.spend(c, applied, now, &d)
 	return d
+}
+
+// resolveRates asks the Resolver what rates the Token counts as carrying,
+// and checks that each is valid.
+func (l *Limiter) resolveRates(ctx context.Context, principal string, token []Rate) ([]Rate, error) {
+	resolved, err := l.resolve(ctx, principal, token)
+	if err != nil {
+		return nil, err
+	}
+
+	var rates []Rate
+	for _, r := range resolved {
+		if !r.valid() {
+			return nil, fmt.Errorf("%w: %+v", ErrInvalidRate, r)
+		}
+
+		rates = addRates(rates, r)
+	}
+
+	return rates, nil
 }
 
 // selectRates finds the capabilities that match a prefix and returns their
@@ -221,15 +238,6 @@ func (l *Limiter) bound(r Rate) Rate {
 	default:
 		return r
 	}
-}
-
-// configured returns the Configured Rates for principal.
-func (l *Limiter) configured(principal string) []Rate {
-	if rates, ok := l.callerRates[principal]; ok {
-		return rates
-	}
-
-	return l.rates
 }
 
 // spend takes one call from each of c's allowances at rates, which must not
@@ -437,17 +445,13 @@ type allowance struct {
 	tat time.Time
 
 	// seen is when a Token last presented the rate, making it a Remembered
-	// Rate.  It is zero for a rate only configuration applied.
+	// Rate.
 	seen time.Time
 }
 
 // remembered reports whether the rate r is a Remembered Rate: presented by a
 // Token within twice its window.
 func (a *allowance) remembered(r Rate, now time.Time) bool {
-	if a.seen.IsZero() {
-		return false
-	}
-
 	// Written so that twice a very long window can't overflow.
 	age := now.Sub(a.seen)
 	return age <= r.Window || age-r.Window <= r.Window
@@ -471,17 +475,16 @@ func (c *caller) remember(rates []Rate, now time.Time) {
 	}
 }
 
-// applied returns the rates that apply to c: every Remembered Rate plus the
-// configured ones, shortest window first.
-func (c *caller) applied(now time.Time, configured []Rate) []Rate {
-	rates := make([]Rate, 0, len(c.allowances)+len(configured))
+// applied returns the rates that apply to c: every Remembered Rate, shortest
+// window first.
+func (c *caller) applied(now time.Time) []Rate {
+	rates := make([]Rate, 0, len(c.allowances))
 	for r, a := range c.allowances {
 		if a.remembered(r, now) {
 			rates = append(rates, r)
 		}
 	}
 
-	rates = addRates(rates, configured...)
 	slices.SortFunc(rates, compareRates)
 	return rates
 }

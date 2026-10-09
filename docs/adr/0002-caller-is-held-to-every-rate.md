@@ -13,11 +13,10 @@ ADR 0001 held a Caller to the **largest** rate they had recently presented. That
 
 Now every valid rate applies at once, each with its own allowance. A request must fit all of them. The rates are:
 
-- the Token's own Rate Capabilities, which are **remembered** for twice their window;
-- every rate remembered from the Caller's other Tokens;
-- the **Configured Rates** the deployment adds for every Caller or for this one.
+- the Token's own Rate Capabilities, as the deployment's **Resolver** (if any) adjusts them, which are **remembered** for twice their window;
+- every rate remembered from the Caller's other Tokens.
 
-An **Override** still replaces all of these, since it is the deployment's answer for one Caller and adding a rate can only ever tighten.
+The Resolver is one function with the final say over what a Token counts as carrying. It is where ceilings, **Overrides** and vouching for rateless Callers live, rather than as options in this library: adding a rate can only tighten, so an Override that loosens has to replace, and only the deployment knows which it wants.
 
 What ADR 0001 decided about **keying** stands: we limit per Caller (the Token's principal), not per Token; limits are per instance; a malformed rate is warned about rather than ignored, and a Token whose rates are all malformed, with nothing else applying, is held to zero.
 
@@ -25,11 +24,13 @@ What ADR 0001 decided about **keying** stands: we limit per Caller (the Token's 
 
 - **Keep the largest rate.** Rejected: tiered limits are the common case for issuers, and the comparison rule was the least obvious part of the design.
 - **Apply only the rates on the request's own Token.** Rejected: a Caller holding an old `200/1m` Token and a new `10/1m` one would get 210 a minute until the old one expired. Applying every remembered rate makes a cut land the first time the new Token is used.
-- **Hold an Unrestricted Token to the Configured and Remembered Rates too.** Deferred to the deployment (`WithLimitUnrestricted`), since it changes what Unrestricted means. The default keeps it a free pass.
+- **Options for ceilings, per-Caller rates and Overrides.** Rejected in favor of the Resolver: each special case would need its own option and its own rules for how it combines with Required and Unrestricted, and the deployment can write the function it needs.
+- **Hold an Unrestricted Token to the deployment's rates too.** Left to the Resolver, since it changes what Unrestricted means: returning rates for a Token that carries none makes it count as carrying them; returning nothing keeps it a free pass.
 
 ## Consequences
 
 - A rate **cut** lands immediately, the first time any Token carrying it is used, and applies to every Token the Caller holds.
 - A rate **raise** waits until the old, lower rate has not been presented for twice its window. Until then the Caller is still held to it. Stop using the old Token, or set an Override.
 - Each rate costs one allowance (a timestamp) per Caller. Forgetting a rate after twice its window still loses nothing: its allowance would be full, and a rate nobody presents any more should not apply.
-- A Configured Rate never satisfies **Required**: that is about what the Token carries.
+- Whatever the Resolver returns counts as what the Token carries, for **Required** too. A deployment adding a ceiling under Required returns nothing for a Token that carries nothing, unless it means to vouch for the Caller.
+- A Resolver failure fails the check with its own reason, so the service can tell an outage from a Caller's problem.

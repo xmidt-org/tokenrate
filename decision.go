@@ -3,7 +3,9 @@
 
 package tokenrate
 
-import "time"
+import (
+	"time"
+)
 
 // Reason says why a check failed.
 type Reason int
@@ -18,6 +20,10 @@ const (
 
 	// RateExceeded means the Caller has no allowance left at the limit.
 	RateExceeded
+
+	// ResolverFailed means the Resolver returned an error or an invalid
+	// rate, so the Caller Rates could not be determined.
+	ResolverFailed
 )
 
 // String returns the reason as written in a Capability Warning, e.g.
@@ -30,6 +36,8 @@ func (r Reason) String() string {
 		return "no-rate-capability"
 	case RateExceeded:
 		return "rate-exceeded"
+	case ResolverFailed:
+		return "resolver-failed"
 	default:
 		return "unknown"
 	}
@@ -46,9 +54,10 @@ type Decision struct {
 	Reason Reason
 
 	// Limits are the rates applied, shortest window first.  The request had
-	// to fit every one.  It is empty when the Token is Unrestricted, and
-	// when the Token's only Rate Capabilities were malformed and nothing
-	// else applied, which is held to a rate of zero.
+	// to fit every one.  It is empty when the Token is Unrestricted, when
+	// the check failed before any rate applied, and when the Token's only
+	// Rate Capabilities were malformed and nothing else applied, which is
+	// held to a rate of zero.
 	Limits []Rate
 
 	// Limit is the rate that refused the request: when Reason is
@@ -64,4 +73,9 @@ type Decision struct {
 	// Warnings are Capability Warnings for the Caller.  They are returned
 	// whether or not the request is Allowed.
 	Warnings []Warning
+
+	// Err is the Resolver's error when Reason is ResolverFailed, or
+	// ErrInvalidRate if it returned an invalid rate.  It is for the service
+	// to log; it says nothing about the Caller.
+	Err error
 }

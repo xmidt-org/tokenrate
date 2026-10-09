@@ -62,20 +62,19 @@ Given principal `p` and the Token's capability strings `t`:
 1. **Select** `t`'s capabilities that match a prefix, and parse each one.
    Each malformed one emits a Capability Warning (in every mode) and is
    otherwise ignored. Each valid one is rescaled into the Window Bounds.
-2. **Override:** if `p` has an Override, its rates are the limits.
-   Remembered and Configured Rates are neither consulted nor updated. Go to
-   step 5.
-3. **Missing:** if `t` has no Rate Capabilities:
+2. **Resolve:** if a Resolver is set, call it with `p` and the rates from
+   step 1. Its result is what `t` counts as carrying from here on, and is
+   trusted (no rescaling). If it errs or returns an invalid rate, fail
+   (`reason=resolver-failed`, `Err` set) and stop.
+3. **Missing:** if `t` had no Rate Capabilities and nothing was resolved:
    - Required → fail (`reason=no-rate-capability`).
    - Correct If Present → allow (Unrestricted). Don't touch `p`'s
-     allowances. Unless `WithLimitUnrestricted` is set, in which case go
-     on with no Token rates.
+     allowances.
 4. **Remember:** record (or refresh) each of `t`'s rates as a Remembered
    Rate for `p`, stamped `now`. Drop any of `p`'s Remembered Rates not
    presented for more than 2× their window. The limits are every remaining
-   Remembered Rate plus the Configured Rates for `p`. If there are none:
-   `t` had Rate Capabilities, so hold it to zero (fail); otherwise it is
-   Unrestricted (allow).
+   Remembered Rate. If there are none, `t` counted as having rates that
+   left nothing to apply, so hold it to zero (fail).
 5. **Spend:** take one call from `p`'s allowance at **every** limit. If any
    has no allowance left, fail (`reason=rate-exceeded`) with `Limit` the
    one with the longest wait, and spend nothing. Otherwise spend all.
@@ -83,10 +82,13 @@ Given principal `p` and the Token's capability strings `t`:
 Then:
 
 - **Fail + Enforcing** → `Allowed: false` with the `Reason`
-  (`NoRateCapability` or `RateExceeded`), plus `RetryAfter` for
-  `RateExceeded`.
-- **Fail + Permissive** → `Allowed: true`. The call is spent at every
-  limit anyway, and a `would-reject` warning is added.
+  (`NoRateCapability`, `RateExceeded` or `ResolverFailed`), plus
+  `RetryAfter` for `RateExceeded`.
+- **Fail + Permissive** → `Allowed: true`. A rate-exceeded call is spent at
+  every limit anyway, and a `would-reject` warning is added.
+
+The Resolver runs outside the Limiter's locks, so it may be slow or call
+out, but it runs on every check.
 
 ## The allowance (GCRA)
 
@@ -107,9 +109,8 @@ so a refusal by one leaves the others untouched.
 
 ## State and memory
 
-- Per Caller: one allowance per rate (rate → TAT, plus when a Token last
-  presented it). Configured and Override rates have allowances but are
-  never "presented", so they are never remembered.
+- Per Caller: one allowance per rate (rate → TAT, plus when it was last
+  presented).
 - An allowance is dropped once its rate is no longer remembered and its
   TAT is in the past: full and unpresented, it carries no information. A
   Caller with no allowances left is deleted.
@@ -129,10 +130,7 @@ package tokenrate
 func New(opts ...Option) (*Limiter, error)
 
 func WithPrefixes(prefixes ...string) Option         // required; none = error from New
-func WithRates(rates ...Rate) Option                  // Configured Rates for every Caller
-func WithCallerRates(principal string, rates ...Rate) Option
-func WithOverride(principal string, rates ...Rate) Option // replaces everything for that Caller
-func WithLimitUnrestricted(limit bool) Option         // default false
+func WithResolver(r Resolver) Option                  // the final say over a Token's rates
 func WithMaxCallers(n int) Option
 func WithMinWindow(d time.Duration) Option            // default 1m
 func WithMaxWindow(d time.Duration) Option            // default 24h
@@ -145,8 +143,12 @@ func WithCorrectIfPresent() Option
 func WithPermissiveRequired() Option
 func WithPermissiveCorrectIfPresent() Option
 
-// Check decides one request and spends from the Caller's allowance.
-func (l *Limiter) Check(principal string, capabilities []string) Decision
+// Resolver decides what rates a Token counts as carrying.  Ceilings,
+// Overrides and vouching for rateless Callers are written here.
+type Resolver func(ctx context.Context, principal string, provided []Rate) ([]Rate, error)
+
+// Check decides one request and spends from the Caller's allowances.
+func (l *Limiter) Check(ctx context.Context, principal string, capabilities []string) Decision
 
 // Middleware applies a Limiter to HTTP requests; Extract is the only
 // service-specific part.
@@ -161,11 +163,12 @@ func (m Middleware) Wrap(next http.Handler) http.Handler
 
 type Decision struct {
 	Allowed    bool
-	Reason     Reason        // None, NoRateCapability, RateExceeded
+	Reason     Reason        // None, NoRateCapability, RateExceeded, ResolverFailed
 	Limits     []Rate        // every rate applied, shortest window first
 	Limit      Rate          // the rate that refused; zero otherwise
 	RetryAfter time.Duration // set when Reason == RateExceeded
 	Warnings   []Warning
+	Err        error         // the Resolver's error when Reason == ResolverFailed
 }
 
 type Warning struct {
@@ -178,9 +181,8 @@ type Rate struct{ Count int; Window time.Duration }
 func ParseRate(string) (Rate, error) // same grammar as capabilities
 ```
 
-Configured Rates and Overrides are fixed at construction. If they must
-change at runtime, rebuild the limiter (state is lost, which only makes it
-more lenient).
+The Resolver is fixed at construction, but it is a function, so what it
+returns can change at runtime; its rates take effect on the next check.
 
 ## Warnings
 
@@ -227,7 +229,8 @@ For each request the middleware:
    request goes on.
 4. Allowed → calls `next`. `RateExceeded` → 429 Too Many Requests, with
    `Retry-After` in whole seconds rounded up when `RetryAfter` is set.
-   `NoRateCapability` → 403 Forbidden.
+   `NoRateCapability` → 403 Forbidden. `ResolverFailed` → 503 Service
+   Unavailable; `Observe` sees `Err`.
 
 It writes its own warning headers because bascule's middleware has already
 handed the request on by the time this runs. A service that is not HTTP,
@@ -264,13 +267,15 @@ Behavior:
   an Override of `10/1ms` still applies. With the defaults, `100/1s` →
   `6000/1m`, `100/25h` → `96/24h`, `1/720h` → `1/24h`.
 - No Rate Capability: Correct If Present → allowed; Required →
-  `NoRateCapability`. With `WithLimitUnrestricted`, Correct If Present →
-  held to the Configured and Remembered Rates, if any.
-- Configured Rates apply alongside the Token's, are not rescaled, and
-  never satisfy Required. Per-Caller ones add to the deployment's.
-- Override looser than the Token → the Override applies. Override stricter
-  → the Override applies. Override with no Rate Capability and Required →
-  allowed. An Override replaces Configured Rates too.
+  `NoRateCapability`.
+- Resolver: sees the principal, context and the Token's valid, bounded
+  rates. A ceiling it appends applies alongside the Token's, unrescaled,
+  and is remembered. An Override it returns replaces the Token's, looser
+  or stricter, and vouches for a rateless Token under Required. Returning
+  nothing for a rateless Token keeps it Unrestricted; returning nothing for
+  a Token with rates holds it to zero. An error or an invalid rate →
+  `ResolverFailed` with `Err`, nothing spent; Permissive → allowed with a
+  `would-reject` warning.
 - Permissive modes: every failing case above → `Allowed: true` plus a
   `would-reject` warning, and the call is still spent.
 - A different principal → an independent allowance.
@@ -282,8 +287,8 @@ Middleware:
 
 - Allowed → `next` runs, warnings in the header. `RateExceeded` → 429 with
   `Retry-After` rounded up, or no `Retry-After` at a zero limit.
-  `NoRateCapability` → 403. Permissive → `next` runs with a `would-reject`
-  warning. `Observe` sees every Decision. A nil `Limiter` or `Extract`
+  `NoRateCapability` → 403. `ResolverFailed` → 503. Permissive → `next`
+  runs with a `would-reject` warning. `Observe` sees every Decision. A nil `Limiter` or `Extract`
   panics in `Wrap`.
 
 ## Open decisions

@@ -4,6 +4,7 @@
 package tokenrate_test
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -77,14 +78,53 @@ func ExampleLimiter_Check() {
 
 	// Without HTTP, apply the Decision yourself.  Every rate in the Token
 	// applies: this Caller may burst 1000, and make at most 100000 a day.
-	d := limiter.Check("abc", []string{"prefix:rate:1000/1m", "prefix:rate:100000/24h"})
+	d := limiter.Check(context.Background(), "abc", []string{"prefix:rate:1000/1m", "prefix:rate:100000/24h"})
 	fmt.Println(d.Allowed, d.Limits, d.Reason)
 
 	// A Token with no rate is Unrestricted under the default mode.
-	d = limiter.Check("def", nil)
+	d = limiter.Check(context.Background(), "def", nil)
 	fmt.Println(d.Allowed, d.Limits, d.Reason)
 
 	// Output:
 	// true [1000/1m 100000/24h] none
 	// true [] none
+}
+
+func ExampleWithResolver() {
+	ceiling := tokenrate.Rate{Count: 500, Window: time.Minute}
+	overrides := map[string][]tokenrate.Rate{
+		"partner": {{Count: 10000, Window: time.Minute}},
+	}
+
+	// The Resolver has the final say over the rates a Token counts as
+	// carrying, so the deployment's special cases live in one place.
+	resolve := func(_ context.Context, principal string, provided []tokenrate.Rate) ([]tokenrate.Rate, error) {
+		if override, ok := overrides[principal]; ok {
+			return override, nil // replaces whatever the Token says
+		}
+
+		if len(provided) == 0 {
+			return nil, nil // a Token with no rate stays Unrestricted
+		}
+
+		return append(provided, ceiling), nil // nobody else exceeds the ceiling
+	}
+
+	limiter, err := tokenrate.New(
+		tokenrate.WithPrefixes("prefix:rate:"),
+		tokenrate.WithResolver(resolve),
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	ctx := context.Background()
+	fmt.Println(limiter.Check(ctx, "abc", []string{"prefix:rate:1000/1m"}).Limits)
+	fmt.Println(limiter.Check(ctx, "partner", []string{"prefix:rate:1000/1m"}).Limits)
+	fmt.Println(limiter.Check(ctx, "def", nil).Limits)
+
+	// Output:
+	// [500/1m 1000/1m]
+	// [10000/1m]
+	// []
 }

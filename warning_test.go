@@ -59,5 +59,6 @@ func TestReasonString(t *testing.T) {
 	assert.Equal(t, "none", None.String())
 	assert.Equal(t, "no-rate-capability", NoRateCapability.String())
 	assert.Equal(t, "rate-exceeded", RateExceeded.String())
+	assert.Equal(t, "resolver-failed", ResolverFailed.String())
 	assert.Equal(t, "unknown", Reason(99).String())
 }

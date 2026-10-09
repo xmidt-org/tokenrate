@@ -4,6 +4,7 @@
 package tokenrate
 
 import (
+	"context"
 	"math"
 	"slices"
 	"testing"
@@ -132,17 +133,14 @@ func TestInvalidRates(t *testing.T) {
 			assert.False(t, tc.rate.valid())
 			assert.Equal(t, "0", tc.rate.String())
 
-			l, err := New(WithPrefixes("p:"), WithOverride("abc", valid, tc.rate))
-			assert.ErrorContains(t, err, `override for "abc"`)
-			assert.Nil(t, l)
-
-			l, err = New(WithPrefixes("p:"), WithRates(valid, tc.rate))
-			assert.ErrorContains(t, err, "rates:")
-			assert.Nil(t, l)
-
-			l, err = New(WithPrefixes("p:"), WithCallerRates("abc", valid, tc.rate))
-			assert.ErrorContains(t, err, `rates for "abc"`)
-			assert.Nil(t, l)
+			// A Resolver may not return one.
+			l, err := New(WithPrefixes("p:"), WithResolver(func(context.Context, string, []Rate) ([]Rate, error) {
+				return []Rate{valid, tc.rate}, nil
+			}))
+			require.NoError(t, err)
+			d := l.Check(context.Background(), "abc", []string{"p:1/1m"})
+			assert.Equal(t, ResolverFailed, d.Reason)
+			assert.ErrorIs(t, d.Err, ErrInvalidRate)
 		})
 	}
 }

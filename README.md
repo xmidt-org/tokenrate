@@ -19,8 +19,8 @@ A rate limiter whose subject and limits come from an authenticated Token.
 It limits how fast each Caller (the Token's principal) may make requests,
 using the Rate Capabilities the Token carries, e.g. `prefix:rate:50/1m`.
 A Token may carry several, such as `1000/1m` and `100000/24h`, and every
-one applies. A deployment can add rates of its own with `WithRates`, or
-replace a Caller's with `WithOverride`.
+one applies. A deployment's own policy, such as a ceiling for everyone or
+an override for one Caller, is a function it supplies with `WithResolver`.
 
 tokenrate has no dependency on bascule, HTTP or JWT libraries. A service
 passes in the principal and capability strings after authenticating a
@@ -69,10 +69,29 @@ handler := tokenrate.Middleware{
 protected := basculeMiddleware.Then(handler)
 ```
 
-Outside HTTP, call `limiter.Check(principal, capabilities)` and apply the
-`Decision` yourself. See the
+Outside HTTP, call `limiter.Check(ctx, principal, capabilities)` and apply
+the `Decision` yourself.
+
+A `Resolver` has the final say over the rates a Token counts as carrying,
+so the special cases live in your code, not in options:
+
+```go
+tokenrate.WithResolver(func(ctx context.Context, principal string, provided []tokenrate.Rate) ([]tokenrate.Rate, error) {
+	if override, ok := overrides[principal]; ok {
+		return override, nil // replaces whatever the Token says
+	}
+
+	if len(provided) == 0 {
+		return nil, nil // a Token with no rate stays Unrestricted
+	}
+
+	return append(provided, ceiling), nil // nobody else exceeds the ceiling
+})
+```
+
+See the
 [examples](https://pkg.go.dev/github.com/xmidt-org/tokenrate#pkg-examples)
-for both.
+for all three.
 
 - [CONTEXT.md](CONTEXT.md) defines the terms.
 - [docs/design.md](docs/design.md) describes the behavior.

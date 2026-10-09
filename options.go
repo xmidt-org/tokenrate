@@ -4,6 +4,7 @@
 package tokenrate
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"regexp"
@@ -60,72 +61,35 @@ func WithPrefixes(prefixes ...string) Option {
 	})
 }
 
-// WithRates adds Configured Rates for every Caller.  They apply alongside
-// whatever the Caller's Tokens say, so they can only tighten: a deployment
-// ceiling no issuer's mistake can exceed.  They are trusted, so the Window
-// Bounds do not apply to them, and they never satisfy WithRequired.  It may
-// be repeated; the rates accumulate.
-func WithRates(rates ...Rate) Option {
+// A Resolver has the final say over the rates a Token counts as carrying.  It
+// is called on every check, outside any lock, with the request's context, the
+// Token's principal and its valid Rate Capabilities, held within the Window
+// Bounds.  Whatever it returns is used instead, as if the Token had carried
+// those rates: they are remembered for the Caller, they count as present for
+// WithRequired, and they are trusted, so the Window Bounds do not apply.
+//
+// That one rule covers the special cases a deployment needs:
+//
+//   - A ceiling for every Caller: return append(provided, ceiling).
+//   - An Override for one Caller: ignore provided and return the Override.
+//   - Vouching for a Caller whose Token has no rate under WithRequired:
+//     return rates when provided is empty.
+//   - Keeping such Tokens Unrestricted while adding a ceiling to the rest:
+//     return nil when provided is empty.
+//
+// Returning an error, or a rate whose count or window is not positive, fails
+// the check with ResolverFailed.
+type Resolver func(ctx context.Context, principal string, provided []Rate) ([]Rate, error)
+
+// WithResolver sets the Resolver.  Without one, a Token's Rate Capabilities
+// are used as they are.
+func WithResolver(r Resolver) Option {
 	return optionFunc(func(l *Limiter) error {
-		if err := validRates(rates); err != nil {
-			return fmt.Errorf("rates: %w", err)
+		if r == nil {
+			return errors.New("resolver cannot be nil")
 		}
 
-		l.rates = addRates(l.rates, rates...)
-		return nil
-	})
-}
-
-// WithCallerRates adds Configured Rates for one Caller, on top of those
-// from WithRates and whatever the Caller's Tokens say.  It may be repeated;
-// the rates accumulate.  A Caller cannot have both these and an Override.
-func WithCallerRates(principal string, rates ...Rate) Option {
-	return optionFunc(func(l *Limiter) error {
-		if err := validRates(rates); err != nil {
-			return fmt.Errorf("rates for %q: %w", principal, err)
-		}
-
-		l.callerRates[principal] = addRates(l.callerRates[principal], rates...)
-		return nil
-	})
-}
-
-// WithOverride sets an Override for a Caller: rates that replace the Caller
-// Rates entirely, Configured Rates included, whether stricter or looser.  It
-// is the way to loosen a Caller, since adding a rate can only tighten.  It
-// may be repeated; the rates accumulate.
-func WithOverride(principal string, rates ...Rate) Option {
-	return optionFunc(func(l *Limiter) error {
-		if err := validRates(rates); err != nil {
-			return fmt.Errorf("override for %q: %w", principal, err)
-		}
-
-		l.overrides[principal] = addRates(l.overrides[principal], rates...)
-		return nil
-	})
-}
-
-func validRates(rates []Rate) error {
-	if len(rates) == 0 {
-		return errors.New("at least one rate is required")
-	}
-
-	for _, r := range rates {
-		if !r.valid() {
-			return errors.New("count and window must be positive")
-		}
-	}
-
-	return nil
-}
-
-// WithLimitUnrestricted sets whether an Unrestricted Token, one with no Rate
-// Capability under WithCorrectIfPresent, is still held to the Caller Rates:
-// the Configured Rates and whatever is remembered from the Caller's other
-// Tokens.  The default, false, leaves such a Token unlimited.
-func WithLimitUnrestricted(limit bool) Option {
-	return optionFunc(func(l *Limiter) error {
-		l.limitUnrestricted = limit
+		l.resolve = r
 		return nil
 	})
 }

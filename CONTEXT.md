@@ -31,33 +31,35 @@ A **Capability** (e.g. `{prefix}50/1m`) stating how many calls a **Caller** may 
 **Malformed Capability**:
 A **Rate Capability** whose rate cannot be parsed. It is warned about and ignored, but still counts as present (so the **Token** is not **Unrestricted**); a Token whose Rate Capabilities are all malformed, with no other **Caller Rates**, is held to a rate of zero.
 
+**Resolver Failure**:
+The **Resolver** returned an error or an invalid rate, so the **Caller Rates** could not be determined. The check fails (`resolver-failed`) and the error is returned to the service to log; it says nothing about the Caller.
+
 **Window Bounds**:
 The shortest and longest window a **Rate Capability** is held at, by default one minute and 24 hours. A rate with a window outside them is rescaled to the nearer bound at the same calls per second, rounded to the nearest call but never below one: `100/1s` is held as `6000/1m`, and `100/48h` as `50/24h`. This keeps a tiny window from churning state and a huge window from granting a huge **Burst**. They do not apply to **Overrides**, which a deployment configures itself.
 
 ### Limits
 
 **Caller Rates**:
-The set of rates a **Caller** is held to: every **Remembered Rate** plus every **Configured Rate**. A request must fit all of them, each from its own allowance, so `1000/1m` alongside `100000/24h` allows neither 1001 in a minute nor 100001 in a day. An **Override** replaces the whole set.
+The set of rates a **Caller** is held to: every **Remembered Rate**. A request must fit all of them, each from its own allowance, so `1000/1m` alongside `100000/24h` allows neither 1001 in a minute nor 100001 in a day.
 _Avoid_: Caller Rate (singular; the old largest-wins rule)
 
 **Remembered Rate**:
-One rate a **Caller** has presented in a **Rate Capability**, kept so it keeps applying to every request the Caller makes, whichever Token they carry. It is forgotten once no request has presented it for twice its window.
+One rate a **Caller** has presented, as a **Rate Capability** or as the **Resolver** decided, kept so it keeps applying to every request the Caller makes, whichever Token they carry. It is forgotten once no request has presented it for twice its window.
 
-**Configured Rate**:
-A rate the deployment adds to the **Caller Rates**, for every Caller or for one. It applies alongside what the Token says and can only tighten. It is not subject to the **Window Bounds**.
-_Avoid_: default rate, global rate
+**Resolver**:
+A function the deployment supplies with the final say over the rates a **Token** counts as carrying. It sees the principal and the Token's valid rates and returns the rates to use, which are trusted (not subject to the **Window Bounds**) and treated exactly as if the Token had carried them. It is where ceilings, **Overrides** and vouching for rateless Callers live, instead of in this library.
 
 **Burst**:
 How many calls a **Caller** may make at once from a full allowance. For one rate it is always the count: `100/24h` allows 100 calls immediately, then refills over the day. With several rates, the smallest count bounds it.
 
 **Override**:
-One or more rates a deployment configures for a specific **Caller**, replacing the **Caller Rates** entirely, whether stricter or looser. It is more trusted than any **Rate Capability** or **Configured Rate**, and is the way to loosen a Caller, since adding a rate can only tighten.
+A **Resolver** policy for one **Caller**: returning fixed rates regardless of what the Token says, whether stricter or looser. Since adding a rate can only tighten, this is how a Caller is loosened.
 _Avoid_: configured rate limit (in this repo)
 
 ### Modes
 
 **Unrestricted**:
-The state of a **Token** with no **Rate Capability** and no **Override** for its **Caller**: no rate limit applies, unless the check is **Required**. A deployment may instead hold Unrestricted Tokens to the **Caller Rates** (`WithLimitUnrestricted`), so a Token without a rate is not a way around the **Configured Rates** or the Caller's other Tokens.
+The state of a **Token** with no **Rate Capability**, for which the **Resolver** (if any) returned no rates: no rate limit applies, unless the check is **Required**. A Resolver that returns rates for such a Token makes it count as carrying them instead.
 
 **Required**:
 A setting under which a **Token** must carry at least one **Rate Capability** (or its **Caller** must have an **Override**); one carrying none fails instead of being **Unrestricted**. The opposite is **Correct If Present**.
@@ -78,6 +80,6 @@ A note for the **Caller** describing a problem with their **Token** or request, 
 > **Dev:** They also sent one request with an older Token saying `200/1m`.
 > **Domain expert:** Then `200/1m` is a **Remembered Rate** too, and applies to every request they make, including ones with the new Token, until they haven't presented it for two minutes.
 > **Dev:** We cut them to `10/1m`, but they keep using the old Token.
-> **Domain expert:** The first time they use the new one, `10/1m` applies to everything. If they never use it, set an **Override**.
+> **Domain expert:** The first time they use the new one, `10/1m` applies to everything. If they never use it, have the **Resolver** return `10/1m` for them: an **Override**.
 > **Dev:** And a Token with no rate at all?
-> **Domain expert:** **Unrestricted** under **Correct If Present**; rejected under **Required**. Unless the deployment limits Unrestricted Tokens, in which case the **Configured Rates** and whatever is remembered for the Caller apply.
+> **Domain expert:** **Unrestricted** under **Correct If Present**; rejected under **Required**. Unless the Resolver returns rates for it, in which case it counts as carrying them.

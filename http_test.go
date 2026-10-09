@@ -4,6 +4,8 @@
 package tokenrate
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -108,6 +110,24 @@ func TestMiddlewarePermissive(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code, "permissive modes let the request through")
 	assert.Equal(t, []string{"would-reject; kind=rate; reason=no-rate-capability"}, rec.Header().Values("Warning"))
 	assert.Empty(t, rec.Header().Values(DefaultWarningHeader), "the configured header is used instead")
+}
+
+func TestMiddlewareResolverFailed(t *testing.T) {
+	boom := errors.New("boom")
+	l := newLimiter(t, newClock(), WithResolver(func(context.Context, string, []Rate) ([]Rate, error) { return nil, boom }))
+
+	var observed Decision
+	h := Middleware{
+		Limiter: l,
+		Extract: headerExtractor,
+		Observe: func(_ *http.Request, d Decision) { observed = d },
+	}.Wrap(http.NotFoundHandler())
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newRequest("abc", "5/1s"))
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Empty(t, rec.Header())
+	assert.ErrorIs(t, observed.Err, boom, "Observe gets the error to log")
 }
 
 func TestMiddlewareMisconfigured(t *testing.T) {
