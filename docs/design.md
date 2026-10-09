@@ -35,7 +35,7 @@ request.
 
 ## Capability format
 
-`{prefix}<count>/<window>`, e.g. `x1:webpa:rate:50/1m`.
+`{prefix}<count>/<window>`, e.g. `prefix:rate:50/1m`.
 
 - The prefix is a string or regular expression, which may contain
   subexpressions. The remainder is the rate. (These are the same semantics
@@ -150,7 +150,7 @@ type Warning struct {
 	Reason string     // "malformed", "would-reject"
 	Params [][2]string // ordered key/value pairs
 }
-func (w Warning) String() string // e.g. `malformed; kind=rate; cap="x1:webpa:rate:10/0s"`
+func (w Warning) String() string // e.g. `malformed; kind=rate; cap="prefix:rate:10/0s"`
 
 type Rate struct{ Count int; Window time.Duration }
 func ParseRate(string) (Rate, error) // same grammar as capabilities
@@ -166,7 +166,7 @@ Warnings, so a service can pass the string straight into bascule's warning
 header, or anywhere else:
 
 ```text
-malformed; kind=rate; cap="x1:webpa:rate:10/0s"
+malformed; kind=rate; cap="prefix:rate:10/0s"
 would-reject; kind=rate; reason=no-rate-capability
 would-reject; kind=rate; reason=rate-exceeded; limit="50/1s"
 ```

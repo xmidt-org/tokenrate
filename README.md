@@ -17,7 +17,7 @@ A library that rate limits Callers using the Rate Capabilities in their Tokens.
 
 A rate limiter whose subject and limits come from an authenticated Token.
 It limits how fast each Caller (the Token's principal) may make requests,
-using the Rate Capabilities the Token carries, e.g. `x1:webpa:rate:50/1m`.
+using the Rate Capabilities the Token carries, e.g. `prefix:rate:50/1m`.
 
 tokenrate has no dependency on bascule, HTTP or JWT libraries. A service
 passes in the principal and capability strings after authenticating a
@@ -33,7 +33,7 @@ go get github.com/xmidt-org/tokenrate
 
 ```go
 limiter, err := tokenrate.New(
-	tokenrate.WithPrefixes("x1:webpa:rate:"),
+	tokenrate.WithPrefixes("prefix:rate:"),
 	tokenrate.WithRequired(),
 )
 if err != nil {

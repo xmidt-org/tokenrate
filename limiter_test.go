@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const prefix = "x1:webpa:rate:"
+const prefix = "prefix:rate:"
 
 // clock is a manually advanced clock, safe for concurrent use.
 type clock struct {
@@ -51,7 +51,7 @@ func newLimiter(t *testing.T, c *clock, opts ...Option) *Limiter {
 
 func rateCaps(rates ...string) []string {
 	caps := make([]string, 0, len(rates)+1)
-	caps = append(caps, "x1:webpa:api:.*:all")
+	caps = append(caps, "prefix:api:.*:all")
 	for _, r := range rates {
 		caps = append(caps, prefix+r)
 	}
@@ -100,7 +100,7 @@ func TestNew(t *testing.T) {
 		{
 			name: "everything",
 			opts: []Option{
-				WithPrefixes(prefix, "x1:xmidt:rate:"),
+				WithPrefixes(prefix, "other:rate:"),
 				WithOverride("p", Rate{Count: 1, Window: time.Second}),
 				WithMaxCallers(10),
 				WithSweepInterval(time.Second),
@@ -220,7 +220,7 @@ func TestRememberedRateRefreshed(t *testing.T) {
 }
 
 func TestMalformed(t *testing.T) {
-	malformed := `malformed; kind=rate; cap="x1:webpa:rate:10/0s"`
+	malformed := `malformed; kind=rate; cap="prefix:rate:10/0s"`
 
 	t.Run("only malformed", func(t *testing.T) {
 		l := newLimiter(t, newClock())
@@ -396,7 +396,7 @@ func TestNoRateCapability(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			l := newLimiter(t, newClock(), tc.opts...)
-			for _, caps := range [][]string{nil, {"x1:webpa:api:.*:all", "x1:other:rate:5/1s"}} {
+			for _, caps := range [][]string{nil, {"prefix:api:.*:all", "other:rate:5/1s"}} {
 				d := l.Check("abc", caps)
 				assert.Equal(t, tc.wantAllowed, d.Allowed)
 				assert.Equal(t, tc.wantReason, d.Reason)
@@ -483,7 +483,7 @@ func TestPermissive(t *testing.T) {
 		assert.True(t, d.Allowed)
 		assert.Equal(t, RateExceeded, d.Reason)
 		require.Len(t, d.Warnings, 2)
-		assert.Equal(t, `malformed; kind=rate; cap="x1:webpa:rate:abc/1s"`, d.Warnings[0].String())
+		assert.Equal(t, `malformed; kind=rate; cap="prefix:rate:abc/1s"`, d.Warnings[0].String())
 		assert.Equal(t, `would-reject; kind=rate; reason=rate-exceeded; limit=0`, d.Warnings[1].String())
 	})
 
@@ -513,11 +513,11 @@ func TestPrefixes(t *testing.T) {
 		caps     []string
 		want     string
 	}{
-		{name: "plain", prefixes: []string{"x1:webpa:rate:"}, caps: []string{"x1:webpa:rate:5/1s"}, want: "5/1s"},
+		{name: "plain", prefixes: []string{"prefix:rate:"}, caps: []string{"prefix:rate:5/1s"}, want: "5/1s"},
 		{
 			name:     "subexpressions",
-			prefixes: []string{`x1:(webpa|xmidt):(rate|limit):`},
-			caps:     []string{"x1:xmidt:limit:7/1m"},
+			prefixes: []string{`(prefix|other):(rate|limit):`},
+			caps:     []string{"other:limit:7/1m"},
 			want:     "7/1m",
 		},
 		{
@@ -528,11 +528,11 @@ func TestPrefixes(t *testing.T) {
 		},
 		{
 			name:     "several prefixes",
-			prefixes: []string{"x1:webpa:rate:", "x1:xmidt:rate:"},
-			caps:     []string{"x1:webpa:rate:5/1s", "x1:xmidt:rate:8/1s"},
+			prefixes: []string{"prefix:rate:", "other:rate:"},
+			caps:     []string{"prefix:rate:5/1s", "other:rate:8/1s"},
 			want:     "8/1s",
 		},
-		{name: "unanchored match is ignored", prefixes: []string{"rate:"}, caps: []string{"x1:rate:5/1s"}},
+		{name: "unanchored match is ignored", prefixes: []string{"rate:"}, caps: []string{"other:rate:5/1s"}},
 	}
 
 	for _, tc := range tests {

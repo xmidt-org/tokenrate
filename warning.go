@@ -26,7 +26,7 @@ type Warning struct {
 
 // String formats w the same way as bascule's Capability Warnings, e.g.
 //
-//	malformed; kind=rate; cap="x1:webpa:rate:10/0s"
+//	malformed; kind=rate; cap="prefix:rate:10/0s"
 //
 // A value that is an HTTP token is written bare; anything else is quoted,
 // escaping only '"' and '\'.

@@ -18,8 +18,8 @@ func TestWarningString(t *testing.T) {
 	}{
 		{
 			name: "malformed",
-			w:    malformedWarning("x1:webpa:rate:10/0s"),
-			want: `malformed; kind=rate; cap="x1:webpa:rate:10/0s"`,
+			w:    malformedWarning("prefix:rate:10/0s"),
+			want: `malformed; kind=rate; cap="prefix:rate:10/0s"`,
 		},
 		{
 			name: "no rate capability",
