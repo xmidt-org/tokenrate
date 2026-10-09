@@ -66,6 +66,21 @@ func mustRate(t *testing.T, s string) Rate {
 	return r
 }
 
+// rates parses several rates, in the order given; none is nil.
+func rates(t *testing.T, ss ...string) []Rate {
+	t.Helper()
+	if len(ss) == 0 {
+		return nil
+	}
+
+	out := make([]Rate, 0, len(ss))
+	for _, s := range ss {
+		out = append(out, mustRate(t, s))
+	}
+
+	return out
+}
+
 // allowedCount makes n checks and returns how many were allowed.
 func allowedCount(l *Limiter, principal string, caps []string, n int) int {
 	allowed := 0
@@ -79,29 +94,41 @@ func allowedCount(l *Limiter, principal string, caps []string, n int) int {
 }
 
 func TestNew(t *testing.T) {
+	one := Rate{Count: 1, Window: time.Second}
+
 	tests := []struct {
 		name    string
 		opts    []Option
-		wantErr bool
+		wantErr string
 	}{
 		{name: "prefix", opts: []Option{WithPrefixes(prefix)}},
-		{name: "no prefix", wantErr: true},
-		{name: "empty prefixes", opts: []Option{WithPrefixes()}, wantErr: true},
-		{name: "bad regex", opts: []Option{WithPrefixes("(")}, wantErr: true},
-		{name: "bad override", opts: []Option{WithPrefixes(prefix), WithOverride("p", Rate{})}, wantErr: true},
-		{name: "bad max callers", opts: []Option{WithPrefixes(prefix), WithMaxCallers(0)}, wantErr: true},
-		{name: "bad sweep interval", opts: []Option{WithPrefixes(prefix), WithSweepInterval(0)}, wantErr: true},
-		{name: "bad min window", opts: []Option{WithPrefixes(prefix), WithMinWindow(0)}, wantErr: true},
-		{name: "bad max window", opts: []Option{WithPrefixes(prefix), WithMaxWindow(-time.Second)}, wantErr: true},
-		{name: "min window above max window", opts: []Option{WithPrefixes(prefix), WithMinWindow(2 * time.Hour), WithMaxWindow(time.Hour)}, wantErr: true},
+		{name: "no prefix", wantErr: ErrNoPrefixes.Error()},
+		{name: "empty prefixes", opts: []Option{WithPrefixes()}, wantErr: ErrNoPrefixes.Error()},
+		{name: "bad regex", opts: []Option{WithPrefixes("(")}, wantErr: `capability prefix "("`},
+		{name: "bad override", opts: []Option{WithPrefixes(prefix), WithOverride("p", Rate{})}, wantErr: `override for "p": count and window`},
+		{name: "empty override", opts: []Option{WithPrefixes(prefix), WithOverride("p")}, wantErr: `override for "p": at least one`},
+		{name: "bad rates", opts: []Option{WithPrefixes(prefix), WithRates(one, Rate{Count: 1})}, wantErr: "rates: count and window"},
+		{name: "empty rates", opts: []Option{WithPrefixes(prefix), WithRates()}, wantErr: "rates: at least one"},
+		{name: "bad caller rates", opts: []Option{WithPrefixes(prefix), WithCallerRates("p", Rate{Window: time.Second})}, wantErr: `rates for "p": count and window`},
+		{name: "empty caller rates", opts: []Option{WithPrefixes(prefix), WithCallerRates("p")}, wantErr: `rates for "p": at least one`},
+		{name: "override and caller rates", opts: []Option{WithPrefixes(prefix), WithOverride("p", one), WithCallerRates("p", one)}, wantErr: `"p" has both rates and an override`},
+		{name: "override and other caller's rates", opts: []Option{WithPrefixes(prefix), WithOverride("p", one), WithCallerRates("q", one)}},
+		{name: "bad max callers", opts: []Option{WithPrefixes(prefix), WithMaxCallers(0)}, wantErr: "max callers"},
+		{name: "bad sweep interval", opts: []Option{WithPrefixes(prefix), WithSweepInterval(0)}, wantErr: "sweep interval"},
+		{name: "bad min window", opts: []Option{WithPrefixes(prefix), WithMinWindow(0)}, wantErr: "min window must"},
+		{name: "bad max window", opts: []Option{WithPrefixes(prefix), WithMaxWindow(-time.Second)}, wantErr: "max window must"},
+		{name: "min window above max window", opts: []Option{WithPrefixes(prefix), WithMinWindow(2 * time.Hour), WithMaxWindow(time.Hour)}, wantErr: "exceeds max window"},
 		{name: "min window equal to max window", opts: []Option{WithPrefixes(prefix), WithMinWindow(time.Hour), WithMaxWindow(time.Hour)}},
-		{name: "nil clock", opts: []Option{WithPrefixes(prefix), WithClock(nil)}, wantErr: true},
+		{name: "nil clock", opts: []Option{WithPrefixes(prefix), WithClock(nil)}, wantErr: "clock"},
 		{name: "nil option", opts: []Option{nil, WithPrefixes(prefix)}},
 		{
 			name: "everything",
 			opts: []Option{
 				WithPrefixes(prefix, "other:rate:"),
-				WithOverride("p", Rate{Count: 1, Window: time.Second}),
+				WithRates(one),
+				WithCallerRates("q", one, Rate{Count: 2, Window: time.Minute}),
+				WithOverride("p", one, Rate{Count: 2, Window: time.Minute}),
+				WithLimitUnrestricted(true),
 				WithMaxCallers(10),
 				WithSweepInterval(time.Second),
 				WithMinWindow(time.Second),
@@ -114,8 +141,8 @@ func TestNew(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			l, err := New(tc.opts...)
-			if tc.wantErr {
-				assert.Error(t, err)
+			if tc.wantErr != "" {
+				assert.ErrorContains(t, err, tc.wantErr)
 				assert.Nil(t, l)
 				return
 			}
@@ -138,13 +165,16 @@ func TestBurstAndRefill(t *testing.T) {
 		d := l.Check("abc", caps)
 		require.True(t, d.Allowed, "call %d", i+1)
 		assert.Equal(t, None, d.Reason)
-		assert.Equal(t, mustRate(t, "5/1s"), d.Limit)
+		assert.Equal(t, rates(t, "5/1s"), d.Limits)
+		assert.True(t, d.Limit.IsZero(), "nothing refused")
 		assert.Empty(t, d.Warnings)
 	}
 
 	d := l.Check("abc", caps)
 	assert.False(t, d.Allowed)
 	assert.Equal(t, RateExceeded, d.Reason)
+	assert.Equal(t, rates(t, "5/1s"), d.Limits)
+	assert.Equal(t, mustRate(t, "5/1s"), d.Limit)
 	assert.Equal(t, 200*time.Millisecond, d.RetryAfter)
 	assert.Empty(t, d.Warnings)
 
@@ -153,30 +183,54 @@ func TestBurstAndRefill(t *testing.T) {
 	assert.False(t, l.Check("abc", caps).Allowed)
 }
 
-func TestLargestRateInToken(t *testing.T) {
+func TestEveryRateInTokenApplies(t *testing.T) {
 	c := newClock()
 	l := newLimiter(t, c)
 
-	d := l.Check("abc", rateCaps("5/1s", "20/1s", "10/1s"))
-	assert.Equal(t, mustRate(t, "20/1s"), d.Limit)
-	assert.Equal(t, 19, allowedCount(l, "abc", rateCaps("5/1s", "20/1s"), 30))
+	d := l.Check("abc", rateCaps("20/1s", "5/1s", "10/1s", "5/1s"))
+	assert.True(t, d.Allowed)
+	assert.Equal(t, rates(t, "5/1s", "10/1s", "20/1s"), d.Limits, "sorted, without the duplicate")
+
+	// The smallest count bounds the burst, and is the rate that refuses.
+	assert.Equal(t, 4, allowedCount(l, "abc", rateCaps("5/1s", "20/1s"), 30))
+	d = l.Check("abc", rateCaps("5/1s", "20/1s"))
+	assert.Equal(t, mustRate(t, "5/1s"), d.Limit)
+	assert.Equal(t, 200*time.Millisecond, d.RetryAfter)
 }
 
-func TestCallerRateSharedAcrossTokens(t *testing.T) {
+func TestTieredRates(t *testing.T) {
+	c := newClock()
+	l := newLimiter(t, c)
+	caps := rateCaps("3/1s", "5/1m")
+
+	assert.Equal(t, 3, allowedCount(l, "abc", caps, 10), "3/1s bounds the burst")
+
+	// A second later 3/1s has refilled, but 5/1m has only 2 left.
+	c.Advance(time.Second)
+	assert.Equal(t, 2, allowedCount(l, "abc", caps, 10))
+
+	d := l.Check("abc", caps)
+	assert.False(t, d.Allowed)
+	assert.Equal(t, mustRate(t, "5/1m"), d.Limit)
+	assert.Equal(t, 11*time.Second, d.RetryAfter)
+
+	// A refusal spends nothing: 3/1s still has its allowance when 5/1m
+	// recovers.
+	c.Advance(11 * time.Second)
+	assert.True(t, l.Check("abc", caps).Allowed)
+}
+
+func TestCallerHeldToEveryTokensRates(t *testing.T) {
 	c := newClock()
 	l := newLimiter(t, c)
 	tokenA := rateCaps("5/1s")
 	tokenB := rateCaps("20/1s")
 
-	assert.Equal(t, mustRate(t, "5/1s"), l.Check("abc", tokenA).Limit)
-	assert.Equal(t, mustRate(t, "20/1s"), l.Check("abc", tokenB).Limit)
+	assert.Equal(t, rates(t, "5/1s"), l.Check("abc", tokenA).Limits)
+	assert.Equal(t, rates(t, "5/1s", "20/1s"), l.Check("abc", tokenB).Limits, "A's rate applies to B")
+	assert.Equal(t, rates(t, "5/1s", "20/1s"), l.Check("abc", tokenA).Limits, "and B's to A")
 
-	// Token A is now held to 20 as well, and both draw from one allowance.
-	// The first call cost 200ms at 5/1s and the next two 50ms each, leaving
-	// 700ms, or 14 calls, of the second's tolerance.
-	d := l.Check("abc", tokenA)
-	assert.Equal(t, mustRate(t, "20/1s"), d.Limit)
-
+	// Both Tokens draw from the same allowances; 5/1s has 2 calls left.
 	allowed := 0
 	for i := range 40 {
 		token := tokenA
@@ -189,7 +243,26 @@ func TestCallerRateSharedAcrossTokens(t *testing.T) {
 		}
 	}
 
-	assert.Equal(t, 14, allowed)
+	assert.Equal(t, 2, allowed)
+}
+
+func TestRateCutLandsImmediately(t *testing.T) {
+	c := newClock()
+	l := newLimiter(t, c)
+	oldToken := rateCaps("20/1s")
+	newToken := rateCaps("2/1s")
+
+	l.Check("abc", oldToken)
+	l.Check("abc", newToken)
+
+	// The old Token is now held to the new rate, which has one call left.
+	d := l.Check("abc", oldToken)
+	assert.Equal(t, rates(t, "2/1s", "20/1s"), d.Limits)
+	assert.True(t, d.Allowed)
+
+	d = l.Check("abc", oldToken)
+	assert.False(t, d.Allowed)
+	assert.Equal(t, mustRate(t, "2/1s"), d.Limit)
 }
 
 func TestRememberedRateForgotten(t *testing.T) {
@@ -198,13 +271,12 @@ func TestRememberedRateForgotten(t *testing.T) {
 
 	l.Check("abc", rateCaps("20/1s"))
 
-	// Presenting 5/1s within twice 20/1s's window keeps the Caller at 20.
+	// Within twice its window, 20/1s still applies.
 	c.Advance(1500 * time.Millisecond)
-	assert.Equal(t, mustRate(t, "20/1s"), l.Check("abc", rateCaps("5/1s")).Limit)
+	assert.Equal(t, rates(t, "5/1s", "20/1s"), l.Check("abc", rateCaps("5/1s")).Limits)
 
 	c.Advance(600 * time.Millisecond)
-	d := l.Check("abc", rateCaps("5/1s"))
-	assert.Equal(t, mustRate(t, "5/1s"), d.Limit)
+	assert.Equal(t, rates(t, "5/1s"), l.Check("abc", rateCaps("5/1s")).Limits)
 }
 
 func TestRememberedRateRefreshed(t *testing.T) {
@@ -216,7 +288,28 @@ func TestRememberedRateRefreshed(t *testing.T) {
 		c.Advance(1500 * time.Millisecond)
 	}
 
-	assert.Equal(t, mustRate(t, "20/1s"), l.Check("abc", rateCaps("5/1s")).Limit)
+	assert.Equal(t, rates(t, "5/1s", "20/1s"), l.Check("abc", rateCaps("5/1s")).Limits)
+}
+
+func TestForgottenRateKeepsItsSpentAllowance(t *testing.T) {
+	c := newClock()
+	l := newLimiter(t, c)
+
+	// 2/1s is presented once, then spent by another Token's requests just
+	// before it is forgotten.
+	l.Check("abc", rateCaps("2/1s"))
+	c.Advance(1900 * time.Millisecond)
+	l.Check("abc", rateCaps("5/1s"))
+
+	c.Advance(200 * time.Millisecond)
+	d := l.Check("abc", rateCaps("5/1s"))
+	assert.Equal(t, rates(t, "5/1s"), d.Limits, "2/1s is forgotten")
+	assert.Len(t, l.shard("abc").get("abc", false).allowances, 2, "but its allowance is not full, so it is kept")
+
+	// Presenting it again finds that allowance rather than a fresh burst.
+	d = l.Check("abc", rateCaps("2/1s"))
+	assert.True(t, d.Allowed)
+	assert.False(t, l.Check("abc", rateCaps("2/1s")).Allowed)
 }
 
 func TestMalformed(t *testing.T) {
@@ -228,6 +321,7 @@ func TestMalformed(t *testing.T) {
 			d := l.Check("abc", rateCaps("10/0s"))
 			assert.False(t, d.Allowed)
 			assert.Equal(t, RateExceeded, d.Reason)
+			assert.Empty(t, d.Limits)
 			assert.True(t, d.Limit.IsZero())
 			assert.Zero(t, d.RetryAfter)
 			require.Len(t, d.Warnings, 1)
@@ -248,7 +342,7 @@ func TestMalformed(t *testing.T) {
 		l := newLimiter(t, newClock())
 		d := l.Check("abc", rateCaps("10/0s", "5/1s"))
 		assert.True(t, d.Allowed)
-		assert.Equal(t, mustRate(t, "5/1s"), d.Limit)
+		assert.Equal(t, rates(t, "5/1s"), d.Limits)
 		require.Len(t, d.Warnings, 1)
 		assert.Equal(t, malformed, d.Warnings[0].String())
 	})
@@ -258,7 +352,7 @@ func TestMalformed(t *testing.T) {
 		l.Check("abc", rateCaps("5/1s"))
 		d := l.Check("abc", rateCaps("10/0s"))
 		assert.True(t, d.Allowed)
-		assert.Equal(t, mustRate(t, "5/1s"), d.Limit)
+		assert.Equal(t, rates(t, "5/1s"), d.Limits)
 		assert.Len(t, d.Warnings, 1)
 	})
 
@@ -276,10 +370,19 @@ func TestMalformed(t *testing.T) {
 		d := l.Check("abc", rateCaps("10/0s"))
 		assert.False(t, d.Allowed)
 		assert.Equal(t, RateExceeded, d.Reason)
+		assert.Empty(t, d.Limits)
 		assert.True(t, d.Limit.IsZero())
 		assert.Zero(t, d.RetryAfter)
 		assert.Len(t, d.Warnings, 1)
 		assert.Equal(t, 1, l.len(), "abc carries no information and is dropped")
+	})
+
+	t.Run("with configured rates", func(t *testing.T) {
+		l := newLimiter(t, newClock(), WithRates(mustRate(t, "3/1s")))
+		d := l.Check("abc", rateCaps("10/0s"))
+		assert.True(t, d.Allowed, "the configured rate is what applies")
+		assert.Equal(t, rates(t, "3/1s"), d.Limits)
+		assert.Len(t, d.Warnings, 1)
 	})
 }
 
@@ -290,7 +393,7 @@ func TestWindowBounds(t *testing.T) {
 		l := newLimiter(t, newClock(), bounds...)
 		d := l.Check("abc", rateCaps("100/1ms"))
 		assert.True(t, d.Allowed)
-		assert.Equal(t, mustRate(t, "100000/1s"), d.Limit, "the same calls per second, per minimum window")
+		assert.Equal(t, rates(t, "100000/1s"), d.Limits, "the same calls per second, per minimum window")
 		assert.Empty(t, d.Warnings)
 	})
 
@@ -298,26 +401,19 @@ func TestWindowBounds(t *testing.T) {
 		l := newLimiter(t, newClock(), bounds...)
 		d := l.Check("abc", rateCaps("100/2h"))
 		assert.True(t, d.Allowed)
-		assert.Equal(t, mustRate(t, "50/1h"), d.Limit, "the same calls per second, per maximum window")
+		assert.Equal(t, rates(t, "50/1h"), d.Limits, "the same calls per second, per maximum window")
 		assert.Empty(t, d.Warnings)
 	})
 
 	t.Run("at the bounds", func(t *testing.T) {
 		l := newLimiter(t, newClock(), bounds...)
-		d := l.Check("abc", rateCaps("5/1s"))
-		assert.True(t, d.Allowed)
-		assert.Equal(t, mustRate(t, "5/1s"), d.Limit)
-
-		d = l.Check("def", rateCaps("5/1h"))
-		assert.True(t, d.Allowed)
-		assert.Equal(t, mustRate(t, "5/1h"), d.Limit)
+		assert.Equal(t, rates(t, "5/1s", "5/1h"), l.Check("abc", rateCaps("5/1h", "5/1s")).Limits)
 	})
 
-	t.Run("rescaled rates compete as rescaled", func(t *testing.T) {
+	t.Run("rescaled rates apply as rescaled", func(t *testing.T) {
 		l := newLimiter(t, newClock(), bounds...)
 		d := l.Check("abc", rateCaps("1/1ms", "500/1s", "7200/2h"))
-		assert.True(t, d.Allowed)
-		assert.Equal(t, mustRate(t, "1000/1s"), d.Limit)
+		assert.Equal(t, rates(t, "500/1s", "1000/1s", "3600/1h"), d.Limits)
 	})
 
 	t.Run("rescaled rates are remembered as one", func(t *testing.T) {
@@ -325,8 +421,8 @@ func TestWindowBounds(t *testing.T) {
 		l.Check("abc", rateCaps("5/1s"))
 		l.Check("abc", rateCaps("5/1ms"))
 		l.Check("abc", rateCaps("500/100ms"))
-		assert.Equal(t, mustRate(t, "5000/1s"), l.Check("abc", rateCaps("1/1s")).Limit)
-		assert.Len(t, l.shard("abc").get("abc", false).rates, 3, "5/1s, 5000/1s and 1/1s")
+		assert.Equal(t, rates(t, "1/1s", "5/1s", "5000/1s"), l.Check("abc", rateCaps("1/1s")).Limits)
+		assert.Len(t, l.shard("abc").get("abc", false).allowances, 3)
 	})
 
 	t.Run("burst is bounded by the maximum window", func(t *testing.T) {
@@ -334,13 +430,11 @@ func TestWindowBounds(t *testing.T) {
 		assert.Equal(t, 5, allowedCount(l, "abc", rateCaps("10/2h"), 10), "10/2h is held as 5/1h")
 	})
 
-	t.Run("override is exempt", func(t *testing.T) {
-		for _, rate := range []string{"10/1ms", "10/2h"} {
-			l := newLimiter(t, newClock(), append(bounds, WithOverride("abc", mustRate(t, rate)))...)
-			d := l.Check("abc", rateCaps("100/1ms"))
-			assert.True(t, d.Allowed)
-			assert.Equal(t, mustRate(t, rate), d.Limit)
-		}
+	t.Run("configured rates are exempt", func(t *testing.T) {
+		opts := append(bounds, WithRates(mustRate(t, "10/1ms")), WithOverride("def", mustRate(t, "10/2h")))
+		l := newLimiter(t, newClock(), opts...)
+		assert.Equal(t, rates(t, "10/1ms", "100000/1s"), l.Check("abc", rateCaps("100/1ms")).Limits)
+		assert.Equal(t, rates(t, "10/2h"), l.Check("def", rateCaps("100/1ms")).Limits)
 	})
 }
 
@@ -365,7 +459,7 @@ func TestDefaultWindowBounds(t *testing.T) {
 		t.Run(tc.rate, func(t *testing.T) {
 			d := l.Check(strconv.Itoa(i), rateCaps(tc.rate))
 			assert.True(t, d.Allowed)
-			assert.Equal(t, mustRate(t, tc.want), d.Limit)
+			assert.Equal(t, rates(t, tc.want), d.Limits)
 			assert.Empty(t, d.Warnings)
 		})
 	}
@@ -379,10 +473,11 @@ func TestNoRateCapability(t *testing.T) {
 		wantReason  Reason
 		wantWarning string
 	}{
-		{name: "correct if present (default)", wantAllowed: true},
-		{name: "correct if present", opts: []Option{WithCorrectIfPresent()}, wantAllowed: true},
+		{name: "correct if present", wantAllowed: true},
+		{name: "correct if present, explicit", opts: []Option{WithCorrectIfPresent()}, wantAllowed: true},
 		{name: "required", opts: []Option{WithRequired()}, wantReason: NoRateCapability},
-		{name: "permissive correct if present", opts: []Option{WithPermissiveCorrectIfPresent()}, wantAllowed: true},
+		{name: "required overrides earlier mode", opts: []Option{WithCorrectIfPresent(), WithRequired()}, wantReason: NoRateCapability},
+		{name: "required ignores configured rates", opts: []Option{WithRequired(), WithRates(Rate{Count: 1, Window: time.Second})}, wantReason: NoRateCapability},
 		{
 			name:        "permissive required",
 			opts:        []Option{WithPermissiveRequired()},
@@ -390,7 +485,7 @@ func TestNoRateCapability(t *testing.T) {
 			wantReason:  NoRateCapability,
 			wantWarning: "would-reject; kind=rate; reason=no-rate-capability",
 		},
-		{name: "last mode wins", opts: []Option{WithRequired(), WithCorrectIfPresent()}, wantAllowed: true},
+		{name: "permissive correct if present", opts: []Option{WithPermissiveCorrectIfPresent()}, wantAllowed: true},
 	}
 
 	for _, tc := range tests {
@@ -400,6 +495,7 @@ func TestNoRateCapability(t *testing.T) {
 				d := l.Check("abc", caps)
 				assert.Equal(t, tc.wantAllowed, d.Allowed)
 				assert.Equal(t, tc.wantReason, d.Reason)
+				assert.Empty(t, d.Limits)
 				assert.True(t, d.Limit.IsZero())
 				if tc.wantWarning == "" {
 					assert.Empty(t, d.Warnings)
@@ -414,29 +510,91 @@ func TestNoRateCapability(t *testing.T) {
 	}
 }
 
+func TestLimitUnrestricted(t *testing.T) {
+	t.Run("nothing applies", func(t *testing.T) {
+		l := newLimiter(t, newClock(), WithLimitUnrestricted(true))
+		d := l.Check("abc", nil)
+		assert.True(t, d.Allowed)
+		assert.Empty(t, d.Limits)
+		assert.Zero(t, l.len())
+	})
+
+	t.Run("configured rates", func(t *testing.T) {
+		l := newLimiter(t, newClock(), WithLimitUnrestricted(true), WithRates(mustRate(t, "3/1s")))
+		d := l.Check("abc", nil)
+		assert.True(t, d.Allowed)
+		assert.Equal(t, rates(t, "3/1s"), d.Limits)
+		assert.Equal(t, 2, allowedCount(l, "abc", nil, 10))
+	})
+
+	t.Run("remembered rates", func(t *testing.T) {
+		l := newLimiter(t, newClock(), WithLimitUnrestricted(true), WithRates(mustRate(t, "3/1s")))
+		l.Check("abc", rateCaps("2/1s"))
+		d := l.Check("abc", nil)
+		assert.Equal(t, rates(t, "2/1s", "3/1s"), d.Limits, "a Token without a rate is no way around the Caller's others")
+	})
+
+	t.Run("required still requires", func(t *testing.T) {
+		l := newLimiter(t, newClock(), WithLimitUnrestricted(true), WithRequired(), WithRates(mustRate(t, "3/1s")))
+		d := l.Check("abc", nil)
+		assert.False(t, d.Allowed)
+		assert.Equal(t, NoRateCapability, d.Reason)
+	})
+}
+
+func TestConfiguredRates(t *testing.T) {
+	c := newClock()
+	l := newLimiter(t, c,
+		WithRates(mustRate(t, "3/1s")),
+		WithRates(mustRate(t, "100/1m"), mustRate(t, "3/1s")),
+		WithCallerRates("abc", mustRate(t, "2/1s")),
+		WithCallerRates("abc", mustRate(t, "50/1m")),
+	)
+
+	d := l.Check("abc", rateCaps("10/1s"))
+	assert.Equal(t, rates(t, "2/1s", "3/1s", "10/1s", "50/1m", "100/1m"), d.Limits, "the Caller's add to the deployment's")
+	assert.Equal(t, rates(t, "3/1s", "10/1s", "100/1m"), l.Check("def", rateCaps("10/1s")).Limits)
+	assert.Equal(t, rates(t, "3/1s", "100/1m"), l.Check("ghi", rateCaps("3/1s")).Limits, "one allowance for a rate however it arrived")
+
+	assert.Equal(t, 1, allowedCount(l, "abc", rateCaps("10/1s"), 10), "2/1s binds abc")
+	assert.Equal(t, 2, allowedCount(l, "def", rateCaps("10/1s"), 10), "3/1s binds def")
+
+	// Configured rates are never remembered, so their allowances go as soon
+	// as they are full, even though they still apply.
+	assert.Equal(t, 3, l.len())
+	c.Advance(2*time.Second + time.Nanosecond)
+	l.sweep()
+	assert.Equal(t, 1, l.len(), "only abc's 50/1m, with 2 calls spent, is not yet full")
+	c.Advance(2 * time.Second)
+	l.sweep()
+	assert.Zero(t, l.len())
+}
+
 func TestOverride(t *testing.T) {
 	tests := []struct {
 		name     string
-		override string
+		override []string
 		caps     []string
 		opts     []Option
 		want     int
 	}{
-		{name: "looser than the token", override: "10/1s", caps: rateCaps("2/1s"), want: 10},
-		{name: "stricter than the token", override: "2/1s", caps: rateCaps("10/1s"), want: 2},
-		{name: "no rate capability", override: "3/1s", caps: rateCaps(), want: 3},
-		{name: "no rate capability, required", override: "3/1s", caps: rateCaps(), opts: []Option{WithRequired()}, want: 3},
-		{name: "malformed", override: "4/1s", caps: rateCaps("10/0s"), want: 4},
+		{name: "looser than the token", override: []string{"10/1s"}, caps: rateCaps("2/1s"), want: 10},
+		{name: "stricter than the token", override: []string{"2/1s"}, caps: rateCaps("10/1s"), want: 2},
+		{name: "no rate capability", override: []string{"3/1s"}, caps: rateCaps(), want: 3},
+		{name: "no rate capability, required", override: []string{"3/1s"}, caps: rateCaps(), opts: []Option{WithRequired()}, want: 3},
+		{name: "malformed", override: []string{"4/1s"}, caps: rateCaps("10/0s"), want: 4},
+		{name: "replaces configured rates", override: []string{"5/1s"}, caps: rateCaps("10/1s"), opts: []Option{WithRates(Rate{Count: 1, Window: time.Second})}, want: 5},
+		{name: "tiered", override: []string{"3/1s", "5/1m"}, caps: rateCaps("10/1s"), want: 3},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			opts := append([]Option{WithOverride("abc", mustRate(t, tc.override))}, tc.opts...)
+			opts := append([]Option{WithOverride("abc", rates(t, tc.override...)...)}, tc.opts...)
 			l := newLimiter(t, newClock(), opts...)
 
 			d := l.Check("abc", tc.caps)
 			assert.True(t, d.Allowed)
-			assert.Equal(t, mustRate(t, tc.override), d.Limit)
+			assert.Equal(t, rates(t, tc.override...), d.Limits)
 			assert.Equal(t, tc.want-1, allowedCount(l, "abc", tc.caps, 20))
 		})
 	}
@@ -446,17 +604,20 @@ func TestOverrideDoesNotRemember(t *testing.T) {
 	l := newLimiter(t, newClock(), WithOverride("abc", Rate{Count: 1, Window: time.Second}))
 	l.Check("abc", rateCaps("100/1s"))
 
-	s := l.shard("abc")
-	c := s.get("abc", false)
+	c := l.shard("abc").get("abc", false)
 	require.NotNil(t, c)
-	assert.Empty(t, c.rates)
+	require.Len(t, c.allowances, 1)
+	for _, a := range c.allowances {
+		assert.True(t, a.seen.IsZero())
+	}
 }
 
 func TestPermissive(t *testing.T) {
 	t.Run("rate exceeded", func(t *testing.T) {
 		c := newClock()
+		start := c.Now()
 		l := newLimiter(t, c, WithPermissiveCorrectIfPresent())
-		caps := rateCaps("2/1s")
+		caps := rateCaps("2/1s", "100/1m")
 
 		for range 2 {
 			d := l.Check("abc", caps)
@@ -467,14 +628,18 @@ func TestPermissive(t *testing.T) {
 		d := l.Check("abc", caps)
 		assert.True(t, d.Allowed)
 		assert.Equal(t, RateExceeded, d.Reason)
+		assert.Equal(t, mustRate(t, "2/1s"), d.Limit)
 		assert.Equal(t, 500*time.Millisecond, d.RetryAfter)
 		require.Len(t, d.Warnings, 1)
 		assert.Equal(t, `would-reject; kind=rate; reason=rate-exceeded; limit="2/1s"`, d.Warnings[0].String())
 
-		// The over-limit call was spent: after one interval there is still
-		// no allowance.
+		// The over-limit call was spent at every rate: after one interval
+		// there is still no allowance at 2/1s, and 100/1m has been charged
+		// for all four calls.
 		c.Advance(500 * time.Millisecond)
 		assert.Equal(t, RateExceeded, l.Check("abc", caps).Reason)
+		a := l.shard("abc").get("abc", false).allowances[mustRate(t, "100/1m")]
+		assert.Equal(t, start.Add(4*600*time.Millisecond), a.tat)
 	})
 
 	t.Run("only malformed", func(t *testing.T) {
@@ -511,26 +676,26 @@ func TestPrefixes(t *testing.T) {
 		name     string
 		prefixes []string
 		caps     []string
-		want     string
+		want     []string
 	}{
-		{name: "plain", prefixes: []string{"prefix:rate:"}, caps: []string{"prefix:rate:5/1s"}, want: "5/1s"},
+		{name: "plain", prefixes: []string{"prefix:rate:"}, caps: []string{"prefix:rate:5/1s"}, want: []string{"5/1s"}},
 		{
 			name:     "subexpressions",
 			prefixes: []string{`(prefix|other):(rate|limit):`},
 			caps:     []string{"other:limit:7/1m"},
-			want:     "7/1m",
+			want:     []string{"7/1m"},
 		},
 		{
 			name:     "alternation stays anchored",
 			prefixes: []string{`a:|b:`},
 			caps:     []string{"zzb:9/1s", "b:4/1s"},
-			want:     "4/1s",
+			want:     []string{"4/1s"},
 		},
 		{
 			name:     "several prefixes",
 			prefixes: []string{"prefix:rate:", "other:rate:"},
 			caps:     []string{"prefix:rate:5/1s", "other:rate:8/1s"},
-			want:     "8/1s",
+			want:     []string{"5/1s", "8/1s"},
 		},
 		{name: "unanchored match is ignored", prefixes: []string{"rate:"}, caps: []string{"other:rate:5/1s"}},
 	}
@@ -543,18 +708,14 @@ func TestPrefixes(t *testing.T) {
 			d := l.Check("abc", tc.caps)
 			assert.True(t, d.Allowed)
 			assert.Empty(t, d.Warnings)
-			if tc.want == "" {
-				assert.True(t, d.Limit.IsZero())
-			} else {
-				assert.Equal(t, mustRate(t, tc.want), d.Limit)
-			}
+			assert.Equal(t, rates(t, tc.want...), d.Limits)
 		})
 	}
 }
 
 func TestMaxCallersEvictsLeastRecentlyUsed(t *testing.T) {
 	l := newLimiter(t, newClock(), WithMaxCallers(2))
-	caps := rateCaps("1/1h")
+	caps := rateCaps("1/1s")
 
 	assert.True(t, l.Check("a", caps).Allowed)
 	assert.True(t, l.Check("b", caps).Allowed)
@@ -621,7 +782,7 @@ func TestStartStop(t *testing.T) {
 
 func TestConcurrentNeverExceedsBurst(t *testing.T) {
 	l := newLimiter(t, newClock())
-	caps := rateCaps("50/1s")
+	caps := rateCaps("50/1s", "200/1m")
 
 	var allowed atomic.Int64
 	var wg sync.WaitGroup

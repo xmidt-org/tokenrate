@@ -16,38 +16,29 @@ func TestSpendBurstThenRefill(t *testing.T) {
 
 	for i := range 5 {
 		var ok bool
-		tat, ok, _ = Spend(tat, now, 5, time.Second, false)
+		tat, ok, _ = Spend(tat, now, 5, time.Second)
 		assert.True(t, ok, "call %d", i+1)
 	}
 
-	next, ok, retryAfter := Spend(tat, now, 5, time.Second, false)
+	next, ok, retryAfter := Spend(tat, now, 5, time.Second)
 	assert.False(t, ok)
 	assert.Equal(t, 200*time.Millisecond, retryAfter)
-	assert.Equal(t, tat, next, "a refused call is not spent")
+	assert.Equal(t, tat.Add(200*time.Millisecond), next, "next is what spending anyway would store")
 
+	// Refusing means keeping tat, so 200ms later one call fits.
 	now = now.Add(200 * time.Millisecond)
-	tat, ok, _ = Spend(tat, now, 5, time.Second, false)
+	tat, ok, _ = Spend(tat, now, 5, time.Second)
 	assert.True(t, ok)
 
-	_, ok, _ = Spend(tat, now, 5, time.Second, false)
+	_, ok, _ = Spend(tat, now, 5, time.Second)
 	assert.False(t, ok)
-}
-
-func TestSpendForce(t *testing.T) {
-	now := time.Unix(1000, 0)
-	tat := now.Add(time.Second)
-
-	next, ok, retryAfter := Spend(tat, now, 1, time.Second, true)
-	assert.False(t, ok)
-	assert.Equal(t, time.Second, retryAfter)
-	assert.Equal(t, tat.Add(time.Second), next, "a forced call is spent")
 }
 
 func TestSpendPastTAT(t *testing.T) {
 	now := time.Unix(1000, 0)
 	tat := now.Add(-time.Hour)
 
-	next, ok, _ := Spend(tat, now, 10, time.Second, false)
+	next, ok, _ := Spend(tat, now, 10, time.Second)
 	assert.True(t, ok)
 	assert.Equal(t, now.Add(100*time.Millisecond), next, "an old TAT counts as now")
 }

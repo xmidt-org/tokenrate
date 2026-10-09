@@ -5,6 +5,7 @@ package tokenrate
 
 import (
 	"math"
+	"slices"
 	"testing"
 	"time"
 
@@ -93,34 +94,20 @@ func TestRateString(t *testing.T) {
 	}
 }
 
-func TestRateLess(t *testing.T) {
+func TestCompareRates(t *testing.T) {
 	r := func(s string) Rate {
 		rate, err := ParseRate(s)
 		require.NoError(t, err)
 		return rate
 	}
 
-	tests := []struct {
-		name string
-		a, b Rate
-		want bool
-	}{
-		{name: "slower", a: r("5/1s"), b: r("20/1s"), want: true},
-		{name: "faster", a: r("20/1s"), b: r("5/1s"), want: false},
-		{name: "equal", a: r("5/1s"), b: r("5/1s"), want: false},
-		{name: "tie, smaller burst", a: r("60/1m"), b: r("3600/1h"), want: true},
-		{name: "tie, larger burst", a: r("3600/1h"), b: r("60/1m"), want: false},
-		{name: "different windows", a: r("100/24h"), b: r("1/1m"), want: true},
-		{name: "zero is least", a: Rate{}, b: r("1/24h"), want: true},
-		{name: "nothing is less than zero", a: r("1/24h"), b: Rate{}, want: false},
-		{name: "huge values", a: r("9223372036854775807/1s"), b: r("9223372036854775807/1ns"), want: true},
-	}
+	in := []Rate{r("100/24h"), r("20/1s"), r("5/1m"), r("5/1s"), r("5/1s")}
+	want := []Rate{r("5/1s"), r("20/1s"), r("5/1m"), r("100/24h")}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, tc.a.Less(tc.b))
-		})
-	}
+	got := addRates(nil, in...)
+	slices.SortFunc(got, compareRates)
+	assert.Equal(t, want, got, "shortest window first, then smallest count, no duplicates")
+	assert.Equal(t, want, addRates(got, r("5/1m")), "adding a held rate changes nothing")
 }
 
 // TestInvalidRates covers Rates built directly rather than parsed, where one
@@ -144,13 +131,17 @@ func TestInvalidRates(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.False(t, tc.rate.valid())
 			assert.Equal(t, "0", tc.rate.String())
-			assert.True(t, tc.rate.Less(valid), "invalid is less than valid")
-			assert.False(t, valid.Less(tc.rate), "valid is not less than invalid")
-			assert.False(t, tc.rate.Less(tc.rate), "invalid is not less than itself")
-			assert.False(t, tc.rate.Less(Rate{}), "invalid is not less than zero")
 
-			l, err := New(WithPrefixes("p:"), WithOverride("abc", tc.rate))
+			l, err := New(WithPrefixes("p:"), WithOverride("abc", valid, tc.rate))
 			assert.ErrorContains(t, err, `override for "abc"`)
+			assert.Nil(t, l)
+
+			l, err = New(WithPrefixes("p:"), WithRates(valid, tc.rate))
+			assert.ErrorContains(t, err, "rates:")
+			assert.Nil(t, l)
+
+			l, err = New(WithPrefixes("p:"), WithCallerRates("abc", valid, tc.rate))
+			assert.ErrorContains(t, err, `rates for "abc"`)
 			assert.Nil(t, l)
 		})
 	}

@@ -7,7 +7,8 @@ SPDX-License-Identifier: Apache-2.0
 
 > **Status:** implemented. Terms are defined in
 > [CONTEXT.md](../CONTEXT.md); the key decisions are in
-> [ADR 0001](adr/0001-caller-rate-is-largest-remembered.md).
+> [ADR 0001](adr/0001-caller-rate-is-largest-remembered.md) and
+> [ADR 0002](adr/0002-caller-is-held-to-every-rate.md).
 
 tokenrate is a standalone Go library (`github.com/xmidt-org/tokenrate`)
 that limits how fast each Caller may make requests. Both **who** is limited
@@ -52,44 +53,46 @@ bascule's middleware.
   is rescaled to the nearer bound at the same calls per second, rounded to
   the nearest call but never below one: `100/1s` is held as `6000/1m`, and
   `100/48h` as `50/24h`. Overrides are exempt.
-- Rates are compared by calls per second (`count / window`). On a tie, the
-  larger count (and therefore the larger Burst) wins.
+- A Token may carry several rates. Every one applies.
 
 ## Behavior on each request
 
 Given principal `p` and the Token's capability strings `t`:
 
 1. **Select** `t`'s capabilities that match a prefix, and parse each one.
-   Each malformed one emits a Capability Warning (in every mode) and counts
-   as a rate of zero. Each valid one is rescaled into the Window Bounds.
-2. **Override:** if `p` has an Override, the limit is the Override.
-   Remembered Rates are neither consulted nor updated. Go to step 5.
+   Each malformed one emits a Capability Warning (in every mode) and is
+   otherwise ignored. Each valid one is rescaled into the Window Bounds.
+2. **Override:** if `p` has an Override, its rates are the limits.
+   Remembered and Configured Rates are neither consulted nor updated. Go to
+   step 5.
 3. **Missing:** if `t` has no Rate Capabilities:
-   - Correct If Present → allow (Unrestricted). Don't touch `p`'s
-     allowance.
    - Required → fail (`reason=no-rate-capability`).
-4. **Remember:** take the largest rate in `t`. If it is non-zero, record it
-   (or refresh it) as a Remembered Rate for `p`, stamped `now`. Drop any of
-   `p`'s Remembered Rates not presented for more than 2× their window. The
-   limit is the largest remaining Remembered Rate. If there is none (the
-   token's only rates were malformed), the limit is zero.
-5. **Spend:** take one call from `p`'s allowance at the limit. A limit of
-   zero always fails. If there is no allowance left, fail
-   (`reason=rate-exceeded`).
+   - Correct If Present → allow (Unrestricted). Don't touch `p`'s
+     allowances. Unless `WithLimitUnrestricted` is set, in which case go
+     on with no Token rates.
+4. **Remember:** record (or refresh) each of `t`'s rates as a Remembered
+   Rate for `p`, stamped `now`. Drop any of `p`'s Remembered Rates not
+   presented for more than 2× their window. The limits are every remaining
+   Remembered Rate plus the Configured Rates for `p`. If there are none:
+   `t` had Rate Capabilities, so hold it to zero (fail); otherwise it is
+   Unrestricted (allow).
+5. **Spend:** take one call from `p`'s allowance at **every** limit. If any
+   has no allowance left, fail (`reason=rate-exceeded`) with `Limit` the
+   one with the longest wait, and spend nothing. Otherwise spend all.
 
 Then:
 
 - **Fail + Enforcing** → `Allowed: false` with the `Reason`
   (`NoRateCapability` or `RateExceeded`), plus `RetryAfter` for
   `RateExceeded`.
-- **Fail + Permissive** → `Allowed: true`. The call is still spent, and a
-  `would-reject` warning is added.
+- **Fail + Permissive** → `Allowed: true`. The call is spent at every
+  limit anyway, and a `would-reject` warning is added.
 
 ## The allowance (GCRA)
 
 Use GCRA (the Generic Cell Rate Algorithm), the leaky bucket stored as a
-single timestamp. Per Caller, store one *theoretical arrival time* (TAT),
-shared by every rate:
+single timestamp. Per Caller and per rate, store one *theoretical arrival
+time* (TAT):
 
 ```text
 interval = window / count        // time one call "costs"
@@ -99,15 +102,17 @@ on allow: TAT = max(TAT, now) + interval
 retryAfter = (TAT - tolerance + interval) - now
 ```
 
-Because the TAT is shared and the interval is chosen per request, a Caller
-switching between rates never gets more than the larger rate in total.
+A request is checked against every applicable rate before any is spent,
+so a refusal by one leaves the others untouched.
 
 ## State and memory
 
-- Per Caller: the TAT plus Remembered Rates (rate → last presented).
-- A Caller with no Remembered Rates left, whose TAT is in the past, is
-  deleted. With a full allowance and nothing remembered, its state carries
-  no information.
+- Per Caller: one allowance per rate (rate → TAT, plus when a Token last
+  presented it). Configured and Override rates have allowances but are
+  never "presented", so they are never remembered.
+- An allowance is dropped once its rate is no longer remembered and its
+  TAT is in the past: full and unpresented, it carries no information. A
+  Caller with no allowances left is deleted.
 - Bound the number of Callers (`WithMaxCallers`, default e.g. 100 000).
   When full, evict the least recently used Caller. Eviction only ever makes
   a Caller's next request more lenient.
@@ -124,7 +129,10 @@ package tokenrate
 func New(opts ...Option) (*Limiter, error)
 
 func WithPrefixes(prefixes ...string) Option         // required; none = error from New
-func WithOverride(principal string, rate Rate) Option // repeatable
+func WithRates(rates ...Rate) Option                  // Configured Rates for every Caller
+func WithCallerRates(principal string, rates ...Rate) Option
+func WithOverride(principal string, rates ...Rate) Option // replaces everything for that Caller
+func WithLimitUnrestricted(limit bool) Option         // default false
 func WithMaxCallers(n int) Option
 func WithMinWindow(d time.Duration) Option            // default 1m
 func WithMaxWindow(d time.Duration) Option            // default 24h
@@ -154,7 +162,8 @@ func (m Middleware) Wrap(next http.Handler) http.Handler
 type Decision struct {
 	Allowed    bool
 	Reason     Reason        // None, NoRateCapability, RateExceeded
-	Limit      Rate          // the limit applied; zero if Unrestricted
+	Limits     []Rate        // every rate applied, shortest window first
+	Limit      Rate          // the rate that refused; zero otherwise
 	RetryAfter time.Duration // set when Reason == RateExceeded
 	Warnings   []Warning
 }
@@ -169,8 +178,9 @@ type Rate struct{ Count int; Window time.Duration }
 func ParseRate(string) (Rate, error) // same grammar as capabilities
 ```
 
-Overrides are fixed at construction. If they must change at runtime,
-rebuild the limiter (state is lost, which only makes it more lenient).
+Configured Rates and Overrides are fixed at construction. If they must
+change at runtime, rebuild the limiter (state is lost, which only makes it
+more lenient).
 
 ## Warnings
 
@@ -240,11 +250,12 @@ Behavior:
 
 - `5/1s`: 5 immediate calls allowed, the 6th returns `RateExceeded` with a
   `RetryAfter` of about 200ms; after 200ms one more is allowed.
-- Two rates in one Token → the larger applies.
-- Token A `5/1s`, then Token B `20/1s`, same principal → the limit is 20
-  for both Tokens; their calls draw from one allowance.
-- After 2× the window without presenting `20/1s`, a Token with `5/1s` is
-  held to 5.
+- Several rates in one Token → all apply: `3/1s` with `5/1m` allows 3,
+  then 2 more a second later, then refuses with `Limit` `5/1m`.
+- Token A `5/1s`, then Token B `20/1s`, same principal → both apply to
+  both Tokens; their calls draw from the same allowances.
+- A cut: Token A `20/1s`, then Token B `2/1s` once → A is held to 2.
+- After 2× the window without presenting `20/1s`, it no longer applies.
 - Only a malformed rate → every call fails (Enforcing), with a warning.
 - A malformed rate alongside a valid one → the valid one applies, and a
   warning is still emitted.
@@ -253,10 +264,13 @@ Behavior:
   an Override of `10/1ms` still applies. With the defaults, `100/1s` →
   `6000/1m`, `100/25h` → `96/24h`, `1/720h` → `1/24h`.
 - No Rate Capability: Correct If Present → allowed; Required →
-  `NoRateCapability`.
+  `NoRateCapability`. With `WithLimitUnrestricted`, Correct If Present →
+  held to the Configured and Remembered Rates, if any.
+- Configured Rates apply alongside the Token's, are not rescaled, and
+  never satisfy Required. Per-Caller ones add to the deployment's.
 - Override looser than the Token → the Override applies. Override stricter
   → the Override applies. Override with no Rate Capability and Required →
-  allowed.
+  allowed. An Override replaces Configured Rates too.
 - Permissive modes: every failing case above → `Allowed: true` plus a
   `would-reject` warning, and the call is still spent.
 - A different principal → an independent allowance.

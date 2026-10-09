@@ -7,16 +7,17 @@ package gcra
 
 import "time"
 
-// Spend tries to take one call from an allowance of count calls per window,
-// whose state is tat.  The tolerance is the window, so a full allowance
-// permits count calls at once.
+// Spend works out taking one call from an allowance of count calls per
+// window, whose state is tat.  The tolerance is the window, so a full
+// allowance permits count calls at once.
 //
-// When the call fits, ok is true and next is the new TAT.  When it doesn't,
-// ok is false, retryAfter is how long until it would fit, and next is tat
-// unchanged unless force is set, in which case the call is spent anyway.
+// next is the TAT after the call.  The caller stores it to spend the call,
+// or keeps tat to refuse it, which lets several allowances be checked before
+// any is spent.  ok reports whether the call fits, and when it doesn't,
+// retryAfter is how long until it would.
 //
 // count and window must be positive.
-func Spend(tat, now time.Time, count int, window time.Duration, force bool) (next time.Time, ok bool, retryAfter time.Duration) {
+func Spend(tat, now time.Time, count int, window time.Duration) (next time.Time, ok bool, retryAfter time.Duration) {
 	interval := Interval(count, window)
 
 	if tat.Before(now) {
@@ -29,12 +30,7 @@ func Spend(tat, now time.Time, count int, window time.Duration, force bool) (nex
 		return next, true, 0
 	}
 
-	retryAfter = allowAt.Sub(now)
-	if force {
-		return next, false, retryAfter
-	}
-
-	return tat, false, retryAfter
+	return next, false, allowAt.Sub(now)
 }
 
 // Interval is the time one call costs at count calls per window.  It is never

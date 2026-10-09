@@ -5,9 +5,9 @@
 // Rate Capabilities carried by the Caller's authenticated Token.
 //
 // tokenrate never sees the Token.  After authenticating a request, a service
-// passes its principal and capability strings to Limiter.Check and decides
-// how to apply the Decision it gets back.  See CONTEXT.md for the terms used
-// here and docs/design.md for the behavior.
+// passes its principal and capability strings to Limiter.Check, or lets
+// Middleware do so, and applies the Decision it gets back.  See CONTEXT.md
+// for the terms used here and docs/design.md for the behavior.
 package tokenrate
 
 import (
@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"hash/maphash"
 	"regexp"
+	"slices"
 	"sync"
 	"time"
 
@@ -36,17 +37,20 @@ const (
 var ErrNoPrefixes = errors.New("at least one capability prefix is required")
 
 // Limiter decides, for each request, whether its Caller is within their
-// Caller Rate.  It is safe for concurrent use.
+// Caller Rates.  It is safe for concurrent use.
 type Limiter struct {
-	prefixes      []*regexp.Regexp
-	overrides     map[string]Rate
-	maxCallers    int
-	sweepInterval time.Duration
-	minWindow     time.Duration
-	maxWindow     time.Duration
-	now           func() time.Time
-	required      bool
-	permissive    bool
+	prefixes          []*regexp.Regexp
+	rates             []Rate            // Configured Rates for every Caller
+	callerRates       map[string][]Rate // Configured Rates per Caller, merged with rates by New
+	overrides         map[string][]Rate
+	maxCallers        int
+	sweepInterval     time.Duration
+	minWindow         time.Duration
+	maxWindow         time.Duration
+	now               func() time.Time
+	required          bool
+	permissive        bool
+	limitUnrestricted bool
 
 	seed   maphash.Seed
 	shards []*shard
@@ -59,7 +63,8 @@ type Limiter struct {
 // New creates a Limiter.  WithPrefixes is required.
 func New(opts ...Option) (*Limiter, error) {
 	l := Limiter{
-		overrides:     make(map[string]Rate),
+		callerRates:   make(map[string][]Rate),
+		overrides:     make(map[string][]Rate),
 		maxCallers:    DefaultMaxCallers,
 		sweepInterval: DefaultSweepInterval,
 		minWindow:     DefaultMinWindow,
@@ -87,6 +92,14 @@ func New(opts ...Option) (*Limiter, error) {
 		errs = append(errs, fmt.Errorf("min window %v exceeds max window %v", l.minWindow, l.maxWindow))
 	}
 
+	for principal, rates := range l.callerRates {
+		if _, ok := l.overrides[principal]; ok {
+			errs = append(errs, fmt.Errorf("%q has both rates and an override", principal))
+		}
+
+		l.callerRates[principal] = addRates(slices.Clone(l.rates), rates...)
+	}
+
 	if err := errors.Join(errs...); err != nil {
 		return nil, err
 	}
@@ -109,19 +122,57 @@ func New(opts ...Option) (*Limiter, error) {
 }
 
 // Check decides one request from principal, whose Token carries capabilities,
-// and spends one call from the Caller's allowance.
+// and spends one call from each of the Caller's allowances.
 func (l *Limiter) Check(principal string, capabilities []string) Decision {
 	var d Decision
-	best, present := l.selectRates(capabilities, &d.Warnings)
+	token, present := l.selectRates(capabilities, &d.Warnings)
+
+	now := l.now()
+	s := l.shard(principal)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.sweepOldest(now)
 
 	if override, ok := l.overrides[principal]; ok {
-		l.checkOverride(principal, override, &d)
+		l.spend(s.get(principal, true), slices.Clone(override), now, &d)
 		return d
 	}
 
 	if !present {
 		if l.required {
 			l.fail(&d, NoRateCapability)
+			return d
+		}
+
+		if !l.limitUnrestricted {
+			d.Allowed = true
+			return d
+		}
+	}
+
+	// A Caller with nothing to remember and no Configured Rates gets no
+	// state, so a Token whose only rates are malformed creates none.
+	configured := l.configured(principal)
+	c := s.get(principal, len(token)+len(configured) > 0)
+
+	var applied []Rate
+	if c != nil {
+		c.remember(token, now)
+		c.prune(now)
+		applied = c.applied(now, configured)
+	}
+
+	if len(applied) == 0 {
+		if c != nil && len(c.allowances) == 0 {
+			s.remove(c)
+		}
+
+		// A Token with Rate Capabilities that left nothing to apply is held
+		// to zero.  One without any is Unrestricted after all.
+		if present {
+			l.fail(&d, RateExceeded)
 		} else {
 			d.Allowed = true
 		}
@@ -129,14 +180,14 @@ func (l *Limiter) Check(principal string, capabilities []string) Decision {
 		return d
 	}
 
-	l.checkRemembered(principal, best, &d)
+	l.spend(c, applied, now, &d)
 	return d
 }
 
-// selectRates finds the capabilities that match a prefix and returns the
-// largest valid rate among them, held within the Window Bounds, and whether
-// any matched at all.  Each malformed one adds a warning.
-func (l *Limiter) selectRates(capabilities []string, warnings *[]Warning) (best Rate, present bool) {
+// selectRates finds the capabilities that match a prefix and returns their
+// valid rates, held within the Window Bounds, and whether any matched at all.
+// Each malformed one adds a warning.
+func (l *Limiter) selectRates(capabilities []string, warnings *[]Warning) (rates []Rate, present bool) {
 	for _, c := range capabilities {
 		for _, re := range l.prefixes {
 			m := re.FindStringSubmatch(c)
@@ -147,15 +198,15 @@ func (l *Limiter) selectRates(capabilities []string, warnings *[]Warning) (best 
 			present = true
 			if r, err := ParseRate(m[len(m)-1]); err != nil {
 				*warnings = append(*warnings, malformedWarning(c))
-			} else if r = l.bound(r); best.Less(r) {
-				best = r
+			} else {
+				rates = addRates(rates, l.bound(r))
 			}
 
 			break
 		}
 	}
 
-	return best, present
+	return rates, present
 }
 
 // bound returns r rescaled to the nearer Window Bound if its window is
@@ -172,65 +223,52 @@ func (l *Limiter) bound(r Rate) Rate {
 	}
 }
 
-func (l *Limiter) checkOverride(principal string, limit Rate, d *Decision) {
-	now := l.now()
-	s := l.shard(principal)
+// configured returns the Configured Rates for principal.
+func (l *Limiter) configured(principal string) []Rate {
+	if rates, ok := l.callerRates[principal]; ok {
+		return rates
+	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.sweepOldest(now)
-	c := s.get(principal, true)
-	d.Limit = limit
-	l.spend(c, now, d)
+	return l.rates
 }
 
-func (l *Limiter) checkRemembered(principal string, best Rate, d *Decision) {
-	now := l.now()
-	s := l.shard(principal)
+// spend takes one call from each of c's allowances at rates, which must not
+// be empty, recording the outcome in d.  Every rate is checked before any is
+// spent, so a refusal spends nothing.  Permissive modes spend regardless.
+func (l *Limiter) spend(c *caller, rates []Rate, now time.Time, d *Decision) {
+	d.Limits = rates
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.sweepOldest(now)
-
-	// A token whose only rates were malformed has nothing to remember, so
-	// it creates no state.
-	c := s.get(principal, best.valid())
-	if c == nil {
-		l.fail(d, RateExceeded)
-		return
+	type pending struct {
+		a    *allowance
+		next time.Time
 	}
 
-	if best.valid() {
-		c.rates[best] = now
+	spends := make([]pending, len(rates))
+	ok := true
+	for i, r := range rates {
+		a := c.allowance(r)
+		next, fits, retryAfter := gcra.Spend(a.tat, now, r.Count, r.Window)
+		spends[i] = pending{a: a, next: next}
+		if !fits {
+			ok = false
+			if retryAfter > d.RetryAfter {
+				d.RetryAfter = retryAfter
+				d.Limit = r
+			}
+		}
 	}
 
-	c.forget(now)
-	d.Limit = c.limit()
-	l.spend(c, now, d)
-
-	if c.expired(now) {
-		s.remove(c)
-	}
-}
-
-// spend takes one call at d.Limit from c's allowance, recording a failure in
-// d if there is none.  Permissive modes spend the call even then.
-func (l *Limiter) spend(c *caller, now time.Time, d *Decision) {
-	if !d.Limit.valid() {
-		l.fail(d, RateExceeded)
-		return
+	if ok || l.permissive {
+		for _, p := range spends {
+			p.a.tat = p.next
+		}
 	}
 
-	next, ok, retryAfter := gcra.Spend(c.tat, now, d.Limit.Count, d.Limit.Window, l.permissive)
-	c.tat = next
 	if ok {
 		d.Allowed = true
 		return
 	}
 
-	d.RetryAfter = retryAfter
 	l.fail(d, RateExceeded)
 }
 
@@ -332,8 +370,7 @@ type shard struct {
 
 // get returns the state for principal and marks it most recently used.  If
 // there is none, it returns nil unless create is set, in which case it adds
-// state with a full allowance, evicting the least recently used Caller if
-// the shard is full.
+// empty state, evicting the least recently used Caller if the shard is full.
 func (s *shard) get(principal string, create bool) *caller {
 	if e, ok := s.callers[principal]; ok {
 		s.lru.MoveToFront(e)
@@ -345,8 +382,8 @@ func (s *shard) get(principal string, create bool) *caller {
 	}
 
 	c := &caller{
-		principal: principal,
-		rates:     make(map[Rate]time.Time, 1),
+		principal:  principal,
+		allowances: make(map[Rate]*allowance, 1),
 	}
 
 	s.callers[principal] = s.lru.PushFront(c)
@@ -372,9 +409,7 @@ func (s *shard) sweepOldest(now time.Time) {
 		return
 	}
 
-	c := e.Value.(*caller)
-	c.forget(now)
-	if c.expired(now) {
+	if c := e.Value.(*caller); c.prune(now) {
 		s.remove(c)
 	}
 }
@@ -382,9 +417,7 @@ func (s *shard) sweepOldest(now time.Time) {
 func (s *shard) sweep(now time.Time) {
 	for e := s.lru.Front(); e != nil; {
 		next := e.Next()
-		c := e.Value.(*caller)
-		c.forget(now)
-		if c.expired(now) {
+		if c := e.Value.(*caller); c.prune(now) {
 			s.remove(c)
 		}
 
@@ -392,43 +425,75 @@ func (s *shard) sweep(now time.Time) {
 	}
 }
 
-// caller is the state kept for one Caller.
+// caller is the state kept for one Caller: an allowance per rate.
 type caller struct {
-	principal string
+	principal  string
+	allowances map[Rate]*allowance
+}
 
-	// tat is the theoretical arrival time of the Caller's allowance, shared
-	// by every rate.
+// allowance is the state of one rate for one Caller.
+type allowance struct {
+	// tat is the theoretical arrival time, the whole state of the GCRA.
 	tat time.Time
 
-	// rates are the Remembered Rates, each with when it was last presented.
-	rates map[Rate]time.Time
+	// seen is when a Token last presented the rate, making it a Remembered
+	// Rate.  It is zero for a rate only configuration applied.
+	seen time.Time
 }
 
-// forget drops the Remembered Rates not presented for more than twice their
-// window.
-func (c *caller) forget(now time.Time) {
-	for r, last := range c.rates {
-		// Written so that twice a very long window can't overflow.
-		if age := now.Sub(last); age > r.Window && age-r.Window > r.Window {
-			delete(c.rates, r)
-		}
+// remembered reports whether the rate r is a Remembered Rate: presented by a
+// Token within twice its window.
+func (a *allowance) remembered(r Rate, now time.Time) bool {
+	if a.seen.IsZero() {
+		return false
+	}
+
+	// Written so that twice a very long window can't overflow.
+	age := now.Sub(a.seen)
+	return age <= r.Window || age-r.Window <= r.Window
+}
+
+// allowance returns the state for r, creating a full one if there is none.
+func (c *caller) allowance(r Rate) *allowance {
+	a, ok := c.allowances[r]
+	if !ok {
+		a = &allowance{}
+		c.allowances[r] = a
+	}
+
+	return a
+}
+
+// remember records each of rates as presented now.
+func (c *caller) remember(rates []Rate, now time.Time) {
+	for _, r := range rates {
+		c.allowance(r).seen = now
 	}
 }
 
-// limit returns the largest Remembered Rate, or the zero Rate if none.
-func (c *caller) limit() Rate {
-	var best Rate
-	for r := range c.rates {
-		if best.Less(r) {
-			best = r
+// applied returns the rates that apply to c: every Remembered Rate plus the
+// configured ones, shortest window first.
+func (c *caller) applied(now time.Time, configured []Rate) []Rate {
+	rates := make([]Rate, 0, len(c.allowances)+len(configured))
+	for r, a := range c.allowances {
+		if a.remembered(r, now) {
+			rates = append(rates, r)
 		}
 	}
 
-	return best
+	rates = addRates(rates, configured...)
+	slices.SortFunc(rates, compareRates)
+	return rates
 }
 
-// expired reports whether c carries no information: nothing is remembered
-// and its allowance is full.
-func (c *caller) expired(now time.Time) bool {
-	return len(c.rates) == 0 && !c.tat.After(now)
+// prune drops the allowances that carry no information: their rate is no
+// longer remembered and they are full.  It reports whether none are left.
+func (c *caller) prune(now time.Time) bool {
+	for r, a := range c.allowances {
+		if !a.remembered(r, now) && !a.tat.After(now) {
+			delete(c.allowances, r)
+		}
+	}
+
+	return len(c.allowances) == 0
 }

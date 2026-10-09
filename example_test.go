@@ -75,15 +75,16 @@ func ExampleLimiter_Check() {
 		panic(err)
 	}
 
-	// Without HTTP, apply the Decision yourself.
-	d := limiter.Check("abc", []string{"prefix:rate:100/1m"})
-	fmt.Println(d.Allowed, d.Limit, d.Reason)
+	// Without HTTP, apply the Decision yourself.  Every rate in the Token
+	// applies: this Caller may burst 1000, and make at most 100000 a day.
+	d := limiter.Check("abc", []string{"prefix:rate:1000/1m", "prefix:rate:100000/24h"})
+	fmt.Println(d.Allowed, d.Limits, d.Reason)
 
 	// A Token with no rate is Unrestricted under the default mode.
 	d = limiter.Check("def", nil)
-	fmt.Println(d.Allowed, d.Limit, d.Reason)
+	fmt.Println(d.Allowed, d.Limits, d.Reason)
 
 	// Output:
-	// true 100/1m none
-	// true 0 none
+	// true [1000/1m 100000/24h] none
+	// true [] none
 }

@@ -1,5 +1,6 @@
 ---
-status: accepted
+status: superseded
+superseded-by: 0002
 ---
 <!--
 SPDX-FileCopyrightText: 2026 Comcast Cable Communications Management, LLC
@@ -7,6 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 -->
 
 # The Caller Rate is the largest recently-presented rate, per instance
+
+> Superseded by [ADR 0002](0002-caller-is-held-to-every-rate.md): a Caller is now held to every rate that applies, not the largest. The decisions here about keying per Caller, per-instance limits, Overrides and malformed rates still stand.
 
 A Caller can hold several valid Tokens with different rates, for example during a rate change. We limit per **Caller** (the Token's principal), not per Token, with one shared allowance held to the **largest** rate the Caller has presented. Each rate is remembered until it hasn't been presented for twice its window. Twice the window is long enough that a full allowance would have refilled, so forgetting loses nothing, and token expiry bounds how long an old, higher rate can linger. Limits are per instance, not cluster-wide: the issuer multiplies by the instance count, so no shared state is needed. Deployment **Overrides** replace the Caller Rate outright, because configuration is more trusted than a Token.
 

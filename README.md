@@ -18,6 +18,9 @@ A library that rate limits Callers using the Rate Capabilities in their Tokens.
 A rate limiter whose subject and limits come from an authenticated Token.
 It limits how fast each Caller (the Token's principal) may make requests,
 using the Rate Capabilities the Token carries, e.g. `prefix:rate:50/1m`.
+A Token may carry several, such as `1000/1m` and `100000/24h`, and every
+one applies. A deployment can add rates of its own with `WithRates`, or
+replace a Caller's with `WithOverride`.
 
 tokenrate has no dependency on bascule, HTTP or JWT libraries. A service
 passes in the principal and capability strings after authenticating a
@@ -73,8 +76,8 @@ for both.
 
 - [CONTEXT.md](CONTEXT.md) defines the terms.
 - [docs/design.md](docs/design.md) describes the behavior.
-- [ADR 0001](docs/adr/0001-caller-rate-is-largest-remembered.md) explains
-  why the Caller Rate is the largest rate a Caller has recently presented.
+- [ADR 0002](docs/adr/0002-caller-is-held-to-every-rate.md) explains why
+  a Caller is held to every rate that applies.
 
 ## Code of Conduct
 

@@ -4,10 +4,12 @@
 package tokenrate
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"math"
 	"math/bits"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -119,38 +121,21 @@ func formatWindow(d time.Duration) string {
 	return s
 }
 
-// Less reports whether r allows fewer calls per second than o.  On a tie the
-// smaller Count (and so the smaller Burst) is less.  Any invalid rate, such
-// as the zero Rate, is less than every valid one.
-func (r Rate) Less(o Rate) bool {
-	switch {
-	case !o.valid():
-		return false
-	case !r.valid():
-		return true
+// compareRates orders rates by window, then by count, so a Decision lists
+// the shortest window first.
+func compareRates(a, b Rate) int {
+	return cmp.Or(cmp.Compare(a.Window, b.Window), cmp.Compare(a.Count, b.Count))
+}
+
+// addRates appends to rates each of more that it doesn't already hold.
+func addRates(rates []Rate, more ...Rate) []Rate {
+	for _, r := range more {
+		if !slices.Contains(rates, r) {
+			rates = append(rates, r)
+		}
 	}
 
-	// Compare the calls per second, r.Count/r.Window < o.Count/o.Window,
-	// without dividing, which would lose precision.  Multiplying both sides
-	// by the two windows (both positive, so the inequality holds) gives
-	//
-	//	r.Count*o.Window < o.Count*r.Window
-	//
-	// Each side is a count over the same common window, so they compare
-	// directly: for 5/1s against 20/1m, 5*60s = 300 vs 20*1s = 20.  The
-	// products are taken in 128 bits because a large count times a window
-	// in nanoseconds overflows 64.
-	rh, rl := bits.Mul64(uint64(r.Count), uint64(o.Window)) //nolint:gosec // positive
-	oh, ol := bits.Mul64(uint64(o.Count), uint64(r.Window)) //nolint:gosec // positive
-	if rh != oh {
-		return rh < oh
-	}
-
-	if rl != ol {
-		return rl < ol
-	}
-
-	return r.Count < o.Count
+	return rates
 }
 
 // rescale returns r expressed per window, allowing the same calls per second.
