@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2024 Comcast Cable Communications Management, LLC
+# SPDX-License-Identifier: Apache-2.0
+---
+name: 'Auto Release'
+
+on:
+  schedule: # Run every day at 12:00 UTC
+    - cron: '0 12 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # yamllint disable-line
+    uses: xmidt-org/shared-go/.github/workflows/auto-releaser.yml@8d1951d0d5489053f9320b3de2453042108b457f # v4.13.11
+    secrets: inherit

@@ -1,0 +1,44 @@
+---
+version: "2"
+
+linters:
+  settings:
+    misspell:
+      locale: US
+    errorlint:
+      # Report non-wrapping error creation using fmt.Errorf
+      errorf: false
+    gosec:
+      # Disable G104: Errors unhandled (similar to errcheck which is disabled)
+      excludes:
+        - G104
+  enable:
+    - dupl
+    - errorlint
+    - goconst
+    - gosec
+    - misspell
+    - unconvert
+    - prealloc
+  disable:
+    - errcheck
+    - ineffassign
+    # Disable default-enabled linters
+    - govet
+    - staticcheck
+    - unused
+  exclusions:
+    rules:
+      # Test files often repeat literals for readability.
+      - path: _test\.go
+        linters:
+          - goconst
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
