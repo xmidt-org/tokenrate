@@ -42,7 +42,7 @@ var (
 	ErrNoPrefixes = errors.New("at least one capability prefix is required")
 
 	// ErrInvalidRate is the Decision.Err when a Resolver returns a rate whose
-	// count or window is not positive.
+	// count or window is not positive, which denies the request.
 	ErrInvalidRate = errors.New("resolver returned an invalid rate")
 )
 
@@ -56,8 +56,6 @@ type Limiter struct {
 	minWindow     time.Duration
 	maxWindow     time.Duration
 	now           func() time.Time
-	required      bool
-	permissive    bool
 
 	seed   maphash.Seed
 	shards []*shard
@@ -129,7 +127,7 @@ func (l *Limiter) Check(ctx context.Context, principal string, capabilities []st
 		resolved, err := l.resolveRates(ctx, principal, token)
 		if err != nil {
 			d.Err = err
-			l.fail(&d, ResolverFailed)
+			d.Reason = Denied
 			return d
 		}
 
@@ -137,13 +135,10 @@ func (l *Limiter) Check(ctx context.Context, principal string, capabilities []st
 		present = present || len(token) > 0
 	}
 
+	// A Token that carries no rate, and that the Resolver gave none, is
+	// Unrestricted.
 	if !present {
-		if l.required {
-			l.fail(&d, NoRateCapability)
-		} else {
-			d.Allowed = true
-		}
-
+		d.Allowed = true
 		return d
 	}
 
@@ -167,13 +162,13 @@ func (l *Limiter) Check(ctx context.Context, principal string, capabilities []st
 	}
 
 	// The Token counts as carrying rates, so leaving nothing to apply holds
-	// it to zero.
+	// it to zero: a typo in the only rate must not mean no limit.
 	if len(applied) == 0 {
 		if c != nil && len(c.allowances) == 0 {
 			s.remove(c)
 		}
 
-		l.fail(&d, RateExceeded)
+		d.Reason = RateExceeded
 		return d
 	}
 
@@ -242,7 +237,7 @@ func (l *Limiter) bound(r Rate) Rate {
 
 // spend takes one call from each of c's allowances at rates, which must not
 // be empty, recording the outcome in d.  Every rate is checked before any is
-// spent, so a refusal spends nothing.  Permissive modes spend regardless.
+// spent, so a refusal spends nothing.
 func (l *Limiter) spend(c *caller, rates []Rate, now time.Time, d *Decision) {
 	d.Limits = rates
 
@@ -266,29 +261,16 @@ func (l *Limiter) spend(c *caller, rates []Rate, now time.Time, d *Decision) {
 		}
 	}
 
-	if ok || l.permissive {
-		for _, p := range spends {
-			p.a.tat = p.next
-		}
-	}
-
-	if ok {
-		d.Allowed = true
+	if !ok {
+		d.Reason = RateExceeded
 		return
 	}
 
-	l.fail(d, RateExceeded)
-}
-
-func (l *Limiter) fail(d *Decision, reason Reason) {
-	d.Reason = reason
-	if l.permissive {
-		d.Allowed = true
-		d.Warnings = append(d.Warnings, wouldRejectWarning(reason, d.Limit))
-		return
+	for _, p := range spends {
+		p.a.tat = p.next
 	}
 
-	d.Allowed = false
+	d.Allowed = true
 }
 
 func (l *Limiter) shard(principal string) *shard {

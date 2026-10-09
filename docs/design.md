@@ -7,8 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 
 > **Status:** implemented. Terms are defined in
 > [CONTEXT.md](../CONTEXT.md); the key decisions are in
-> [ADR 0001](adr/0001-caller-rate-is-largest-remembered.md) and
-> [ADR 0002](adr/0002-caller-is-held-to-every-rate.md).
+> [ADR 0001](adr/0001-caller-rate-is-largest-remembered.md),
+> [ADR 0002](adr/0002-caller-is-held-to-every-rate.md) and
+> [ADR 0003](adr/0003-resolver-decides-policy.md).
 
 tokenrate is a standalone Go library (`github.com/xmidt-org/tokenrate`)
 that limits how fast each Caller may make requests. Both **who** is limited
@@ -60,16 +61,14 @@ bascule's middleware.
 Given principal `p` and the Token's capability strings `t`:
 
 1. **Select** `t`'s capabilities that match a prefix, and parse each one.
-   Each malformed one emits a Capability Warning (in every mode) and is
-   otherwise ignored. Each valid one is rescaled into the Window Bounds.
+   Each malformed one emits a Capability Warning and is otherwise ignored.
+   Each valid one is rescaled into the Window Bounds.
 2. **Resolve:** if a Resolver is set, call it with `p` and the rates from
    step 1. Its result is what `t` counts as carrying from here on, and is
    trusted (no rescaling). If it errs or returns an invalid rate, fail
-   (`reason=resolver-failed`, `Err` set) and stop.
-3. **Missing:** if `t` had no Rate Capabilities and nothing was resolved:
-   - Required → fail (`reason=no-rate-capability`).
-   - Correct If Present → allow (Unrestricted). Don't touch `p`'s
-     allowances.
+   (`reason=denied`, `Err` set) and stop.
+3. **Missing:** if `t` had no Rate Capabilities and nothing was resolved,
+   allow (Unrestricted). Don't touch `p`'s allowances.
 4. **Remember:** record (or refresh) each of `t`'s rates as a Remembered
    Rate for `p`, stamped `now`. Drop any of `p`'s Remembered Rates not
    presented for more than 2× their window. The limits are every remaining
@@ -79,13 +78,10 @@ Given principal `p` and the Token's capability strings `t`:
    has no allowance left, fail (`reason=rate-exceeded`) with `Limit` the
    one with the longest wait, and spend nothing. Otherwise spend all.
 
-Then:
-
-- **Fail + Enforcing** → `Allowed: false` with the `Reason`
-  (`NoRateCapability`, `RateExceeded` or `ResolverFailed`), plus
-  `RetryAfter` for `RateExceeded`.
-- **Fail + Permissive** → `Allowed: true`. A rate-exceeded call is spent at
-  every limit anyway, and a `would-reject` warning is added.
+A failure is `Allowed: false` with the `Reason` (`RateExceeded` or
+`Denied`), plus `RetryAfter` for `RateExceeded`. There is no permissive
+mode: a service wanting a dry run calls `Check`, logs the Decision, and
+ignores `Allowed`.
 
 The Resolver runs outside the Limiter's locks, so it may be slow or call
 out, but it runs on every check.
@@ -136,15 +132,8 @@ func WithMinWindow(d time.Duration) Option            // default 1m
 func WithMaxWindow(d time.Duration) Option            // default 24h
 func WithClock(func() time.Time) Option               // for tests
 
-// Mode options. Each sets the whole mode; the last one applied wins.
-// Default: WithCorrectIfPresent.
-func WithRequired() Option
-func WithCorrectIfPresent() Option
-func WithPermissiveRequired() Option
-func WithPermissiveCorrectIfPresent() Option
-
 // Resolver decides what rates a Token counts as carrying.  Ceilings,
-// Overrides and vouching for rateless Callers are written here.
+// Overrides, requiring a rate and blocking a Caller are written here.
 type Resolver func(ctx context.Context, principal string, provided []Rate) ([]Rate, error)
 
 // Check decides one request and spends from the Caller's allowances.
@@ -163,16 +152,16 @@ func (m Middleware) Wrap(next http.Handler) http.Handler
 
 type Decision struct {
 	Allowed    bool
-	Reason     Reason        // None, NoRateCapability, RateExceeded, ResolverFailed
+	Reason     Reason        // None, RateExceeded, Denied
 	Limits     []Rate        // every rate applied, shortest window first
 	Limit      Rate          // the rate that refused; zero otherwise
 	RetryAfter time.Duration // set when Reason == RateExceeded
 	Warnings   []Warning
-	Err        error         // the Resolver's error when Reason == ResolverFailed
+	Err        error         // the Resolver's error when Reason == Denied
 }
 
 type Warning struct {
-	Reason string     // "malformed", "would-reject"
+	Reason string     // "malformed"
 	Params [][2]string // ordered key/value pairs
 }
 func (w Warning) String() string // e.g. `malformed; kind=rate; cap="prefix:rate:10/0s"`
@@ -192,8 +181,6 @@ header, or anywhere else:
 
 ```text
 malformed; kind=rate; cap="prefix:rate:10/0s"
-would-reject; kind=rate; reason=no-rate-capability
-would-reject; kind=rate; reason=rate-exceeded; limit="50/1s"
 ```
 
 Quoting: a value that is an HTTP token is written bare; anything else is
@@ -229,8 +216,7 @@ For each request the middleware:
    request goes on.
 4. Allowed → calls `next`. `RateExceeded` → 429 Too Many Requests, with
    `Retry-After` in whole seconds rounded up when `RetryAfter` is set.
-   `NoRateCapability` → 403 Forbidden. `ResolverFailed` → 503 Service
-   Unavailable; `Observe` sees `Err`.
+   `Denied` → 403 Forbidden; `Observe` sees `Err`.
 
 It writes its own warning headers because bascule's middleware has already
 handed the request on by the time this runs. A service that is not HTTP,
@@ -259,25 +245,21 @@ Behavior:
   both Tokens; their calls draw from the same allowances.
 - A cut: Token A `20/1s`, then Token B `2/1s` once → A is held to 2.
 - After 2× the window without presenting `20/1s`, it no longer applies.
-- Only a malformed rate → every call fails (Enforcing), with a warning.
+- Only a malformed rate → every call fails, with a warning.
 - A malformed rate alongside a valid one → the valid one applies, and a
   warning is still emitted.
 - Window Bounds `1s` to `1h`: `100/1ms` → held as `100000/1s`; `100/2h` →
   held as `50/1h`, so only 50 calls burst; `5/1s` and `5/1h` → unchanged;
   an Override of `10/1ms` still applies. With the defaults, `100/1s` →
   `6000/1m`, `100/25h` → `96/24h`, `1/720h` → `1/24h`.
-- No Rate Capability: Correct If Present → allowed; Required →
-  `NoRateCapability`.
+- No Rate Capability → allowed, Unrestricted, no state.
 - Resolver: sees the principal, context and the Token's valid, bounded
   rates. A ceiling it appends applies alongside the Token's, unrescaled,
   and is remembered. An Override it returns replaces the Token's, looser
-  or stricter, and vouches for a rateless Token under Required. Returning
-  nothing for a rateless Token keeps it Unrestricted; returning nothing for
-  a Token with rates holds it to zero. An error or an invalid rate →
-  `ResolverFailed` with `Err`, nothing spent; Permissive → allowed with a
-  `would-reject` warning.
-- Permissive modes: every failing case above → `Allowed: true` plus a
-  `would-reject` warning, and the call is still spent.
+  or stricter, and vouches for a rateless Token. Returning nothing for a
+  rateless Token keeps it Unrestricted; returning nothing for a Token with
+  rates holds it to zero. An error, such as requiring a rate, or an
+  invalid rate → `Denied` with `Err`, nothing spent.
 - A different principal → an independent allowance.
 - MaxCallers reached → the least recently used Caller is evicted.
 - Concurrent calls (`-race`) → never more than Burst allowed from a full
@@ -286,9 +268,8 @@ Behavior:
 Middleware:
 
 - Allowed → `next` runs, warnings in the header. `RateExceeded` → 429 with
-  `Retry-After` rounded up, or no `Retry-After` at a zero limit.
-  `NoRateCapability` → 403. `ResolverFailed` → 503. Permissive → `next`
-  runs with a `would-reject` warning. `Observe` sees every Decision. A nil `Limiter` or `Extract`
+  `Retry-After` rounded up, or no `Retry-After` at a zero limit. `Denied`
+  → 403, with `Err` visible to `Observe`. A nil `Limiter` or `Extract`
   panics in `Wrap`.
 
 ## Open decisions
@@ -298,7 +279,7 @@ Middleware:
   Recommended: keep tokenrate free of networking. If it's needed, the
   service resolves the Caller Origin (via bascule) and picks which limiter
   or Override applies before calling `Check`.
-- **Tokens with no rate during a rollout.** Under Correct If Present, a
-  Caller who also holds a rate-limited Token can avoid the limit by using
-  an older Token without one. Recommended: accept this (it's what
-  Unrestricted means) and use Required once every Token carries a rate.
+- **Tokens with no rate during a rollout.** A Caller who also holds a
+  rate-limited Token can avoid the limit by using an older Token without
+  one. Recommended: accept this (it's what Unrestricted means) and have
+  the Resolver deny rateless Tokens once every Token carries a rate.

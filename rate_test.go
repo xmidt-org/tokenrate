@@ -139,7 +139,7 @@ func TestInvalidRates(t *testing.T) {
 			}))
 			require.NoError(t, err)
 			d := l.Check(context.Background(), "abc", []string{"p:1/1m"})
-			assert.Equal(t, ResolverFailed, d.Reason)
+			assert.Equal(t, Denied, d.Reason)
 			assert.ErrorIs(t, d.Err, ErrInvalidRate)
 		})
 	}

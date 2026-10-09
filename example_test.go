@@ -5,6 +5,7 @@ package tokenrate_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -24,9 +25,18 @@ func principalAndCapabilities(r *http.Request) (string, []string) {
 var now = time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 
 func ExampleMiddleware() {
+	// Every Token must carry a rate; the Resolver denies the ones that don't.
+	requireRate := func(_ context.Context, _ string, provided []tokenrate.Rate) ([]tokenrate.Rate, error) {
+		if len(provided) == 0 {
+			return nil, errors.New("no rate capability")
+		}
+
+		return provided, nil
+	}
+
 	limiter, err := tokenrate.New(
 		tokenrate.WithPrefixes("prefix:rate:"),
-		tokenrate.WithRequired(),
+		tokenrate.WithResolver(requireRate),
 		tokenrate.WithClock(func() time.Time { return now }),
 	)
 	if err != nil {
@@ -56,7 +66,7 @@ func ExampleMiddleware() {
 		fmt.Println(w.Code, w.Header().Get("Retry-After"), w.Header().Get(tokenrate.DefaultWarningHeader))
 	}
 
-	// A Token with no rate is refused, because the Limiter is Required.
+	// A Token with no rate is denied by the Resolver.
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.Header.Set("Principal", "def")
 	w := httptest.NewRecorder()
@@ -81,7 +91,7 @@ func ExampleLimiter_Check() {
 	d := limiter.Check(context.Background(), "abc", []string{"prefix:rate:1000/1m", "prefix:rate:100000/24h"})
 	fmt.Println(d.Allowed, d.Limits, d.Reason)
 
-	// A Token with no rate is Unrestricted under the default mode.
+	// A Token with no rate is Unrestricted, unless a Resolver says otherwise.
 	d = limiter.Check(context.Background(), "def", nil)
 	fmt.Println(d.Allowed, d.Limits, d.Reason)
 

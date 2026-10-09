@@ -31,8 +31,8 @@ A **Capability** (e.g. `{prefix}50/1m`) stating how many calls a **Caller** may 
 **Malformed Capability**:
 A **Rate Capability** whose rate cannot be parsed. It is warned about and ignored, but still counts as present (so the **Token** is not **Unrestricted**); a Token whose Rate Capabilities are all malformed, with no other **Caller Rates**, is held to a rate of zero.
 
-**Resolver Failure**:
-The **Resolver** returned an error or an invalid rate, so the **Caller Rates** could not be determined. The check fails (`resolver-failed`) and the error is returned to the service to log; it says nothing about the Caller.
+**Denied**:
+The **Resolver** returned an error, or an invalid rate, so the request is refused whatever the Token says. It is how a deployment requires a rate, blocks a Caller, or refuses anything else it decides to. The error is returned to the service to log, not shown to the Caller.
 
 **Window Bounds**:
 The shortest and longest window a **Rate Capability** is held at, by default one minute and 24 hours. A rate with a window outside them is rescaled to the nearer bound at the same calls per second, rounded to the nearest call but never below one: `100/1s` is held as `6000/1m`, and `100/48h` as `50/24h`. This keeps a tiny window from churning state and a huge window from granting a huge **Burst**. They do not apply to **Overrides**, which a deployment configures itself.
@@ -56,19 +56,11 @@ How many calls a **Caller** may make at once from a full allowance. For one rate
 A **Resolver** policy for one **Caller**: returning fixed rates regardless of what the Token says, whether stricter or looser. Since adding a rate can only tighten, this is how a Caller is loosened.
 _Avoid_: configured rate limit (in this repo)
 
-### Modes
+### Outcomes
 
 **Unrestricted**:
-The state of a **Token** with no **Rate Capability**, for which the **Resolver** (if any) returned no rates: no rate limit applies, unless the check is **Required**. A Resolver that returns rates for such a Token makes it count as carrying them instead.
-
-**Required**:
-A setting under which a **Token** must carry at least one **Rate Capability** (or its **Caller** must have an **Override**); one carrying none fails instead of being **Unrestricted**. The opposite is **Correct If Present**.
-
-**Correct If Present**:
-The default setting: a **Token** without **Rate Capabilities** is **Unrestricted**, but one that has them is held to the **Caller Rate**.
-
-**Permissive**:
-A mode in which a failing check lets the request through and reports what it would have rejected as a **Capability Warning**. The opposite is **Enforcing**. It combines with **Required** or **Correct If Present**.
+The state of a **Token** with no **Rate Capability**, for which the **Resolver** (if any) returned no rates: no rate limit applies. A Resolver that returns rates for such a Token makes it count as carrying them instead, and one that returns an error has it **Denied**. There is no mode that changes this; the library always enforces exactly the rates it is given.
+_Avoid_: Required, Correct If Present, Permissive, Enforcing (the old modes)
 
 **Capability Warning**:
 A note for the **Caller** describing a problem with their **Token** or request, e.g. a **Malformed Capability** or a limit that would have been exceeded. Returned whether or not the request is blocked.
@@ -82,4 +74,4 @@ A note for the **Caller** describing a problem with their **Token** or request, 
 > **Dev:** We cut them to `10/1m`, but they keep using the old Token.
 > **Domain expert:** The first time they use the new one, `10/1m` applies to everything. If they never use it, have the **Resolver** return `10/1m` for them: an **Override**.
 > **Dev:** And a Token with no rate at all?
-> **Domain expert:** **Unrestricted** under **Correct If Present**; rejected under **Required**. Unless the Resolver returns rates for it, in which case it counts as carrying them.
+> **Domain expert:** **Unrestricted**, unless the **Resolver** returns rates for it, in which case it counts as carrying them, or an error, in which case it is **Denied**. Requiring a rate is a two-line Resolver.

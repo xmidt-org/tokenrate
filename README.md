@@ -38,12 +38,12 @@ Place the middleware after the one that authenticates the request. It
 checks the Caller, writes one warning header per Capability Warning, and
 answers 429 Too Many Requests (with Retry-After) or 403 Forbidden itself.
 The only service-specific part is finding the principal and capabilities in
-the request:
+the request. A Token with no rate is unlimited unless a Resolver says
+otherwise:
 
 ```go
 limiter, err := tokenrate.New(
 	tokenrate.WithPrefixes("prefix:rate:"),
-	tokenrate.WithRequired(),
 )
 if err != nil {
 	return err
@@ -73,7 +73,8 @@ Outside HTTP, call `limiter.Check(ctx, principal, capabilities)` and apply
 the `Decision` yourself.
 
 A `Resolver` has the final say over the rates a Token counts as carrying,
-so the special cases live in your code, not in options:
+so policy lives in your code, not in options. The library always enforces
+what it returns: no rates means no limit, and an error denies the request.
 
 ```go
 tokenrate.WithResolver(func(ctx context.Context, principal string, provided []tokenrate.Rate) ([]tokenrate.Rate, error) {
@@ -82,10 +83,10 @@ tokenrate.WithResolver(func(ctx context.Context, principal string, provided []to
 	}
 
 	if len(provided) == 0 {
-		return nil, nil // a Token with no rate stays Unrestricted
+		return nil, errors.New("no rate capability") // every Token must carry a rate
 	}
 
-	return append(provided, ceiling), nil // nobody else exceeds the ceiling
+	return append(provided, ceiling), nil // nobody exceeds the ceiling
 })
 ```
 
@@ -97,6 +98,8 @@ for all three.
 - [docs/design.md](docs/design.md) describes the behavior.
 - [ADR 0002](docs/adr/0002-caller-is-held-to-every-rate.md) explains why
   a Caller is held to every rate that applies.
+- [ADR 0003](docs/adr/0003-resolver-decides-policy.md) explains why the
+  library always enforces and a Resolver decides policy.
 
 ## Code of Conduct
 

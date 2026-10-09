@@ -125,7 +125,6 @@ func TestNew(t *testing.T) {
 				WithSweepInterval(time.Second),
 				WithMinWindow(time.Second),
 				WithMaxWindow(time.Hour),
-				WithPermissiveRequired(),
 			},
 		},
 	}
@@ -323,13 +322,6 @@ func TestMalformed(t *testing.T) {
 		assert.Zero(t, l.len(), "no state is kept for a zero limit")
 	})
 
-	t.Run("only malformed, required", func(t *testing.T) {
-		l := newLimiter(t, newClock(), WithRequired())
-		d := l.Check(ctx, "abc", rateCaps("10/0s"))
-		assert.False(t, d.Allowed)
-		assert.Equal(t, RateExceeded, d.Reason, "a malformed rate still counts as present")
-	})
-
 	t.Run("alongside a valid rate", func(t *testing.T) {
 		l := newLimiter(t, newClock())
 		d := l.Check(ctx, "abc", rateCaps("10/0s", "5/1s"))
@@ -457,48 +449,18 @@ func TestDefaultWindowBounds(t *testing.T) {
 	}
 }
 
-func TestNoRateCapability(t *testing.T) {
-	tests := []struct {
-		name        string
-		opts        []Option
-		wantAllowed bool
-		wantReason  Reason
-		wantWarning string
-	}{
-		{name: "correct if present", wantAllowed: true},
-		{name: "correct if present, explicit", opts: []Option{WithCorrectIfPresent()}, wantAllowed: true},
-		{name: "required", opts: []Option{WithRequired()}, wantReason: NoRateCapability},
-		{name: "required overrides earlier mode", opts: []Option{WithCorrectIfPresent(), WithRequired()}, wantReason: NoRateCapability},
-		{
-			name:        "permissive required",
-			opts:        []Option{WithPermissiveRequired()},
-			wantAllowed: true,
-			wantReason:  NoRateCapability,
-			wantWarning: "would-reject; kind=rate; reason=no-rate-capability",
-		},
-		{name: "permissive correct if present", opts: []Option{WithPermissiveCorrectIfPresent()}, wantAllowed: true},
+func TestUnrestricted(t *testing.T) {
+	l := newLimiter(t, newClock())
+	for _, caps := range [][]string{nil, {"prefix:api:.*:all", "other:rate:5/1s"}} {
+		d := l.Check(ctx, "abc", caps)
+		assert.True(t, d.Allowed)
+		assert.Equal(t, None, d.Reason)
+		assert.Empty(t, d.Limits)
+		assert.True(t, d.Limit.IsZero())
+		assert.Empty(t, d.Warnings)
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			l := newLimiter(t, newClock(), tc.opts...)
-			for _, caps := range [][]string{nil, {"prefix:api:.*:all", "other:rate:5/1s"}} {
-				d := l.Check(ctx, "abc", caps)
-				assert.Equal(t, tc.wantAllowed, d.Allowed)
-				assert.Equal(t, tc.wantReason, d.Reason)
-				assert.Empty(t, d.Limits)
-				assert.True(t, d.Limit.IsZero())
-				if tc.wantWarning == "" {
-					assert.Empty(t, d.Warnings)
-				} else {
-					require.Len(t, d.Warnings, 1)
-					assert.Equal(t, tc.wantWarning, d.Warnings[0].String())
-				}
-			}
-
-			assert.Zero(t, l.len(), "an Unrestricted Token doesn't touch the allowance")
-		})
-	}
+	assert.Zero(t, l.len(), "an Unrestricted Token doesn't touch the allowance")
 }
 
 // ceiling is a Resolver that adds rates to every Token's.
@@ -542,14 +504,18 @@ func TestResolver(t *testing.T) {
 		assert.Equal(t, rates(t, "3/1s", "100/1m"), l.Check(ctx, "abc", nil).Limits, "10/1s is forgotten, the ceiling re-added")
 	})
 
-	t.Run("override", func(t *testing.T) {
+	t.Run("override and required", func(t *testing.T) {
 		override := rates(t, "5/1m", "2/1s")
-		l := newLimiter(t, newClock(), WithRequired(), WithResolver(func(_ context.Context, principal string, provided []Rate) ([]Rate, error) {
-			if principal == "abc" {
+		required := errors.New("a rate is required")
+		l := newLimiter(t, newClock(), WithResolver(func(_ context.Context, principal string, provided []Rate) ([]Rate, error) {
+			switch {
+			case principal == "abc":
 				return override, nil
+			case len(provided) == 0:
+				return nil, required
+			default:
+				return provided, nil
 			}
-
-			return provided, nil
 		}))
 
 		d := l.Check(ctx, "abc", rateCaps("100/1s"))
@@ -563,7 +529,8 @@ func TestResolver(t *testing.T) {
 
 		d = l.Check(ctx, "def", nil)
 		assert.False(t, d.Allowed)
-		assert.Equal(t, NoRateCapability, d.Reason, "others still need a rate")
+		assert.Equal(t, Denied, d.Reason, "others still need a rate")
+		assert.ErrorIs(t, d.Err, required)
 	})
 
 	t.Run("unrestricted stays unrestricted", func(t *testing.T) {
@@ -600,15 +567,15 @@ func TestResolver(t *testing.T) {
 		assert.Zero(t, l.len())
 	})
 
-	t.Run("error", func(t *testing.T) {
-		boom := errors.New("boom")
-		l := newLimiter(t, newClock(), WithResolver(func(context.Context, string, []Rate) ([]Rate, error) { return nil, boom }))
-		d := l.Check(ctx, "abc", rateCaps("10/1s"))
+	t.Run("denied", func(t *testing.T) {
+		blocked := errors.New("blocked")
+		l := newLimiter(t, newClock(), WithResolver(func(context.Context, string, []Rate) ([]Rate, error) { return nil, blocked }))
+		d := l.Check(ctx, "abc", rateCaps("10/1s", "10/0s"))
 		assert.False(t, d.Allowed)
-		assert.Equal(t, ResolverFailed, d.Reason)
-		assert.ErrorIs(t, d.Err, boom)
+		assert.Equal(t, Denied, d.Reason)
+		assert.ErrorIs(t, d.Err, blocked)
 		assert.Empty(t, d.Limits)
-		assert.Empty(t, d.Warnings)
+		assert.Len(t, d.Warnings, 1, "the malformed rate is still warned about")
 		assert.Zero(t, l.len(), "nothing is spent or remembered")
 	})
 
@@ -616,69 +583,8 @@ func TestResolver(t *testing.T) {
 		l := newLimiter(t, newClock(), WithResolver(ceiling(Rate{Count: 1})))
 		d := l.Check(ctx, "abc", rateCaps("10/1s"))
 		assert.False(t, d.Allowed)
-		assert.Equal(t, ResolverFailed, d.Reason)
+		assert.Equal(t, Denied, d.Reason)
 		assert.ErrorIs(t, d.Err, ErrInvalidRate)
-	})
-
-	t.Run("error, permissive", func(t *testing.T) {
-		l := newLimiter(t, newClock(), WithPermissiveRequired(), WithResolver(func(context.Context, string, []Rate) ([]Rate, error) { return nil, errors.New("boom") }))
-		d := l.Check(ctx, "abc", nil)
-		assert.True(t, d.Allowed)
-		assert.Equal(t, ResolverFailed, d.Reason)
-		assert.Error(t, d.Err)
-		require.Len(t, d.Warnings, 1)
-		assert.Equal(t, "would-reject; kind=rate; reason=resolver-failed", d.Warnings[0].String())
-	})
-}
-
-func TestPermissive(t *testing.T) {
-	t.Run("rate exceeded", func(t *testing.T) {
-		c := newClock()
-		start := c.Now()
-		l := newLimiter(t, c, WithPermissiveCorrectIfPresent())
-		caps := rateCaps("2/1s", "100/1m")
-
-		for range 2 {
-			d := l.Check(ctx, "abc", caps)
-			assert.True(t, d.Allowed)
-			assert.Empty(t, d.Warnings)
-		}
-
-		d := l.Check(ctx, "abc", caps)
-		assert.True(t, d.Allowed)
-		assert.Equal(t, RateExceeded, d.Reason)
-		assert.Equal(t, mustRate(t, "2/1s"), d.Limit)
-		assert.Equal(t, 500*time.Millisecond, d.RetryAfter)
-		require.Len(t, d.Warnings, 1)
-		assert.Equal(t, `would-reject; kind=rate; reason=rate-exceeded; limit="2/1s"`, d.Warnings[0].String())
-
-		// The over-limit call was spent at every rate: after one interval
-		// there is still no allowance at 2/1s, and 100/1m has been charged
-		// for all four calls.
-		c.Advance(500 * time.Millisecond)
-		assert.Equal(t, RateExceeded, l.Check(ctx, "abc", caps).Reason)
-		a := l.shard("abc").get("abc", false).allowances[mustRate(t, "100/1m")]
-		assert.Equal(t, start.Add(4*600*time.Millisecond), a.tat)
-	})
-
-	t.Run("only malformed", func(t *testing.T) {
-		l := newLimiter(t, newClock(), WithPermissiveRequired())
-		d := l.Check(ctx, "abc", rateCaps("abc/1s"))
-		assert.True(t, d.Allowed)
-		assert.Equal(t, RateExceeded, d.Reason)
-		require.Len(t, d.Warnings, 2)
-		assert.Equal(t, `malformed; kind=rate; cap="prefix:rate:abc/1s"`, d.Warnings[0].String())
-		assert.Equal(t, `would-reject; kind=rate; reason=rate-exceeded; limit=0`, d.Warnings[1].String())
-	})
-
-	t.Run("resolved rate", func(t *testing.T) {
-		l := newLimiter(t, newClock(), WithPermissiveRequired(), WithResolver(ceiling(Rate{Count: 1, Window: time.Second})))
-		assert.Empty(t, l.Check(ctx, "abc", nil).Warnings)
-
-		d := l.Check(ctx, "abc", nil)
-		assert.True(t, d.Allowed)
-		assert.Equal(t, RateExceeded, d.Reason)
-		assert.Len(t, d.Warnings, 1)
 	})
 }
 

@@ -84,50 +84,32 @@ func TestMiddleware(t *testing.T) {
 	assert.Equal(t, time.Second/2, observed[2].RetryAfter)
 }
 
-func TestMiddlewareRequired(t *testing.T) {
-	l := newLimiter(t, newClock(), WithRequired())
-	h := Middleware{Limiter: l, Extract: headerExtractor, WarningHeader: "Warning"}.
-		Wrap(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+func TestMiddlewareDenied(t *testing.T) {
+	denied := errors.New("a rate is required")
+	l := newLimiter(t, newClock(), WithResolver(func(_ context.Context, _ string, provided []Rate) ([]Rate, error) {
+		if len(provided) == 0 {
+			return nil, denied
+		}
 
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, newRequest("abc"))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
-	assert.Empty(t, rec.Header().Get("Retry-After"))
-	assert.Empty(t, rec.Header())
-
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, newRequest("abc", "5/1s"))
-	assert.Equal(t, http.StatusNoContent, rec.Code)
-}
-
-func TestMiddlewarePermissive(t *testing.T) {
-	l := newLimiter(t, newClock(), WithPermissiveRequired())
-	h := Middleware{Limiter: l, Extract: headerExtractor, WarningHeader: "Warning"}.
-		Wrap(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
-
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, newRequest("abc"))
-	assert.Equal(t, http.StatusNoContent, rec.Code, "permissive modes let the request through")
-	assert.Equal(t, []string{"would-reject; kind=rate; reason=no-rate-capability"}, rec.Header().Values("Warning"))
-	assert.Empty(t, rec.Header().Values(DefaultWarningHeader), "the configured header is used instead")
-}
-
-func TestMiddlewareResolverFailed(t *testing.T) {
-	boom := errors.New("boom")
-	l := newLimiter(t, newClock(), WithResolver(func(context.Context, string, []Rate) ([]Rate, error) { return nil, boom }))
+		return provided, nil
+	}))
 
 	var observed Decision
 	h := Middleware{
 		Limiter: l,
 		Extract: headerExtractor,
 		Observe: func(_ *http.Request, d Decision) { observed = d },
-	}.Wrap(http.NotFoundHandler())
+	}.Wrap(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
 
 	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newRequest("abc"))
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Empty(t, rec.Header(), "the error is not shown to the Caller")
+	assert.ErrorIs(t, observed.Err, denied, "Observe gets the error to log")
+
+	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, newRequest("abc", "5/1s"))
-	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
-	assert.Empty(t, rec.Header())
-	assert.ErrorIs(t, observed.Err, boom, "Observe gets the error to log")
+	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
 func TestMiddlewareMisconfigured(t *testing.T) {

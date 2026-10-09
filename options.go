@@ -65,20 +65,23 @@ func WithPrefixes(prefixes ...string) Option {
 // is called on every check, outside any lock, with the request's context, the
 // Token's principal and its valid Rate Capabilities, held within the Window
 // Bounds.  Whatever it returns is used instead, as if the Token had carried
-// those rates: they are remembered for the Caller, they count as present for
-// WithRequired, and they are trusted, so the Window Bounds do not apply.
+// those rates: they are remembered for the Caller, and they are trusted, so
+// the Window Bounds do not apply.  Returning no rates leaves the Token
+// Unrestricted.
+// Returning an error denies the request, whatever the reason: the error is
+// returned in the Decision for the service to log, and is not shown to the
+// Caller.
 //
-// That one rule covers the special cases a deployment needs:
+// That covers the policy a deployment needs, without options for each case:
 //
 //   - A ceiling for every Caller: return append(provided, ceiling).
 //   - An Override for one Caller: ignore provided and return the Override.
-//   - Vouching for a Caller whose Token has no rate under WithRequired:
-//     return rates when provided is empty.
-//   - Keeping such Tokens Unrestricted while adding a ceiling to the rest:
-//     return nil when provided is empty.
+//   - Requiring a rate: return an error when provided is empty.
+//   - Vouching for a Caller whose Token has no rate: return rates for it.
+//   - Blocking a Caller: return an error.
 //
-// Returning an error, or a rate whose count or window is not positive, fails
-// the check with ResolverFailed.
+// A rate whose count or window is not positive also denies the request, with
+// ErrInvalidRate.
 type Resolver func(ctx context.Context, principal string, provided []Rate) ([]Rate, error)
 
 // WithResolver sets the Resolver.  Without one, a Token's Rate Capabilities
@@ -163,40 +166,6 @@ func WithClock(now func() time.Time) Option {
 		}
 
 		l.now = now
-		return nil
-	})
-}
-
-// The mode options each set the whole mode; the last one applied wins.
-
-// WithRequired makes the Limiter Enforcing and Required: a Token must carry a
-// Rate Capability, or its Caller must have an Override.
-func WithRequired() Option {
-	return withMode(true, false)
-}
-
-// WithCorrectIfPresent makes the Limiter Enforcing and Correct If Present: a
-// Token without Rate Capabilities is Unrestricted.  This is the default.
-func WithCorrectIfPresent() Option {
-	return withMode(false, false)
-}
-
-// WithPermissiveRequired is WithRequired, except failing checks are allowed
-// and reported as would-reject Capability Warnings.
-func WithPermissiveRequired() Option {
-	return withMode(true, true)
-}
-
-// WithPermissiveCorrectIfPresent is WithCorrectIfPresent, except failing
-// checks are allowed and reported as would-reject Capability Warnings.
-func WithPermissiveCorrectIfPresent() Option {
-	return withMode(false, true)
-}
-
-func withMode(required, permissive bool) Option {
-	return optionFunc(func(l *Limiter) error {
-		l.required = required
-		l.permissive = permissive
 		return nil
 	})
 }

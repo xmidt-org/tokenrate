@@ -5,19 +5,14 @@ package tokenrate
 
 import "strings"
 
-// Warning reasons.
-const (
-	// WarningMalformed reports a Rate Capability whose rate cannot be parsed.
-	WarningMalformed = "malformed"
-
-	// WarningWouldReject reports a check that failed in a Permissive mode.
-	WarningWouldReject = "would-reject"
-)
+// WarningMalformed is the Reason of a Warning about a Rate Capability whose
+// rate cannot be parsed.
+const WarningMalformed = "malformed"
 
 // Warning is a Capability Warning: a note for the Caller describing a problem
 // with their Token or request.
 type Warning struct {
-	// Reason is WarningMalformed or WarningWouldReject.
+	// Reason is WarningMalformed.
 	Reason string
 
 	// Params are ordered key/value pairs giving the details.
@@ -90,17 +85,4 @@ func malformedWarning(capability string) Warning {
 		Reason: WarningMalformed,
 		Params: [][2]string{{"kind", "rate"}, {"cap", capability}},
 	}
-}
-
-func wouldRejectWarning(reason Reason, limit Rate) Warning {
-	w := Warning{
-		Reason: WarningWouldReject,
-		Params: [][2]string{{"kind", "rate"}, {"reason", reason.String()}},
-	}
-
-	if reason == RateExceeded {
-		w.Params = append(w.Params, [2]string{"limit", limit.String()})
-	}
-
-	return w
 }
