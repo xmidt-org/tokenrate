@@ -180,12 +180,9 @@ type Warning struct {
 }
 func (w Warning) String() string // e.g. `malformed; kind=rate; cap="prefix:rate:10/0s"`
 
-type Rate struct {
-	Count  int
-	Window time.Duration
-	Text   string // the rate as the client wrote it; String returns it
-}
-func ParseRate(string) (Rate, error) // same grammar as capabilities; always sets Text, zero on error
+type Rate struct{ Count int; Window time.Duration } // plus the text it was parsed from, unexported
+func (r Rate) String() string // the rate as the client wrote it, or formatted if built in code
+func ParseRate(string) (Rate, error) // same grammar as capabilities; zero on error, still reading back as written
 ```
 
 The Resolver is fixed at construction, but it is a function, so what it

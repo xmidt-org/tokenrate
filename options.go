@@ -65,8 +65,8 @@ func WithPrefixes(prefixes ...string) Option {
 // A Resolver has the final say over the rates a Token counts as carrying.  It
 // is called on every check, outside any lock, with the request's context, the
 // Token's principal and the rates of its Rate Capabilities, in Token order
-// and held within the Window Bounds, each with the rate as the client wrote
-// it in Text.  A Malformed Capability arrives as a zero Rate, which allows
+// and held within the Window Bounds.  Each reads back as the client wrote it
+// from String.  A Malformed Capability arrives as a zero Rate, which allows
 // nothing.
 //
 // Whatever the Resolver returns is used instead, as if the Token had carried
