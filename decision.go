@@ -46,9 +46,10 @@ type Decision struct {
 
 	// Limits are the rates applied, shortest window first.  The request had
 	// to fit every one.  It is empty when the Token is Unrestricted or the
-	// Resolver denied the request.  It holds zero Rates when the Token
-	// counts as carrying them, e.g. its only Rate Capabilities were
-	// malformed, each carrying its text.
+	// Resolver denied the request.  It holds zero Rates, each with its
+	// Text, when the Token counts as carrying them, e.g. its only Rate
+	// Capabilities were malformed.  Otherwise the rates are the Caller's
+	// allowances, without Text.
 	Limits []Rate
 
 	// Limit is the rate that refused the request: when Reason is

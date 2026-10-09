@@ -162,9 +162,7 @@ func (l *Limiter) Check(ctx context.Context, principal string, capabilities []st
 }
 
 // resolveRates asks the Resolver what rates the Token counts as carrying,
-// and checks that each is valid or zero.  Duplicates are dropped, and a valid
-// rate's Malformed text, if a Resolver made sense of it and left it there, so
-// the rate shares an allowance with the same rate written properly.
+// and checks that each is valid or zero.  Duplicates are dropped.
 func (l *Limiter) resolveRates(ctx context.Context, principal string, provided []Rate) ([]Rate, error) {
 	resolved, err := l.resolve(ctx, principal, provided)
 	if err != nil {
@@ -173,10 +171,7 @@ func (l *Limiter) resolveRates(ctx context.Context, principal string, provided [
 
 	var rates []Rate
 	for _, r := range resolved {
-		switch {
-		case r.valid():
-			r.Malformed = ""
-		case !r.IsZero():
+		if !r.valid() && !r.IsZero() {
 			return nil, fmt.Errorf("%w: %+v", ErrInvalidRate, r)
 		}
 
@@ -188,7 +183,7 @@ func (l *Limiter) resolveRates(ctx context.Context, principal string, provided [
 
 // selectRates finds the capabilities that match a prefix and returns their
 // rates, held within the Window Bounds, in Token order.  Each malformed one
-// adds a warning and contributes a zero Rate carrying its text.
+// adds a warning and contributes a zero Rate.  Each carries its text.
 func (l *Limiter) selectRates(capabilities []string, warnings *[]Warning) (rates []Rate) {
 	for _, c := range capabilities {
 		for _, re := range l.prefixes {
@@ -403,7 +398,8 @@ func (s *shard) sweep(now time.Time) {
 	}
 }
 
-// caller is the state kept for one Caller: an allowance per rate.
+// caller is the state kept for one Caller: an allowance per rate, keyed by
+// Rate.key.
 type caller struct {
 	principal  string
 	allowances map[Rate]*allowance
@@ -428,11 +424,14 @@ func (a *allowance) remembered(r Rate, now time.Time) bool {
 }
 
 // allowance returns the state for r, creating a full one if there is none.
+// Rates are keyed by count and window, so every spelling of a rate draws from
+// one allowance.
 func (c *caller) allowance(r Rate) *allowance {
-	a, ok := c.allowances[r]
+	k := r.key()
+	a, ok := c.allowances[k]
 	if !ok {
 		a = &allowance{}
-		c.allowances[r] = a
+		c.allowances[k] = a
 	}
 
 	return a

@@ -60,10 +60,11 @@ bascule's middleware.
 
 Given principal `p` and the Token's capability strings `t`:
 
-1. **Select** `t`'s capabilities that match a prefix, and parse each one.
-   Each malformed one emits a Capability Warning and contributes a zero
-   rate carrying the text as written. Each valid one is rescaled into the
-   Window Bounds. Duplicates are dropped.
+1. **Select** `t`'s capabilities that match a prefix, and parse each one,
+   keeping the text as the client wrote it. Each malformed one emits a
+   Capability Warning and contributes a zero rate. Each valid one is
+   rescaled into the Window Bounds, which drops the text if the rate
+   changed. Duplicates are dropped.
 2. **Resolve:** call the Resolver (`DefaultResolver` unless replaced) with
    `p` and the rates from step 1, in Token order. Its result is what `t`
    counts as carrying from here on, and is trusted (no rescaling). If it
@@ -111,8 +112,9 @@ so a refusal by one leaves the others untouched.
 
 ## State and memory
 
-- Per Caller: one allowance per rate (rate → TAT, plus when it was last
-  presented).
+- Per Caller: one allowance per rate (count and window → TAT, plus when it
+  was last presented). Spellings don't matter: `4/90m` and `4/1h30m` draw
+  from one allowance.
 - An allowance is dropped once its rate is no longer remembered and its
   TAT is in the past: full and unpresented, it carries no information. A
   Caller with no allowances left is deleted.
@@ -140,7 +142,8 @@ func WithClock(func() time.Time) Option               // for tests
 
 // Resolver decides what rates a Token counts as carrying.  Ceilings,
 // Overrides, requiring a rate and blocking a Caller are written here.
-// Malformed Capabilities arrive as zero Rates carrying their text.
+// Every rate carries its text as the client wrote it; Malformed
+// Capabilities arrive as zero Rates.
 type Resolver func(ctx context.Context, principal string, provided []Rate) ([]Rate, error)
 
 // DefaultResolver ignores malformed rates beside valid ones, and holds a
@@ -178,11 +181,11 @@ type Warning struct {
 func (w Warning) String() string // e.g. `malformed; kind=rate; cap="prefix:rate:10/0s"`
 
 type Rate struct {
-	Count     int
-	Window    time.Duration
-	Malformed string // the rate as written, when it could not be parsed
+	Count  int
+	Window time.Duration
+	Text   string // the rate as the client wrote it; String returns it
 }
-func ParseRate(string) (Rate, error) // same grammar as capabilities; on error, a zero Rate with Malformed set
+func ParseRate(string) (Rate, error) // same grammar as capabilities; always sets Text, zero on error
 ```
 
 The Resolver is fixed at construction, but it is a function, so what it

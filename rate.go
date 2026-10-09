@@ -21,16 +21,17 @@ var ErrMalformedRate = errors.New("malformed rate")
 // Rate is a number of calls allowed per window.  Its Burst is always Count.
 //
 // A zero Rate, with no Count and no Window, allows nothing.  It is how a
-// Malformed Capability reaches a Resolver, carrying the rate as written in
-// Malformed, and how a Resolver refuses a Token without denying the Caller.
+// Malformed Capability reaches a Resolver, and how a Resolver refuses a Token
+// without denying the Caller.
 type Rate struct {
 	Count  int
 	Window time.Duration
 
-	// Malformed is the rate as written when it could not be parsed, and
-	// empty otherwise.  ParseRate sets it, so a Resolver can log the text or
-	// make sense of a format ParseRate doesn't.
-	Malformed string
+	// Text is the rate as the client wrote it, set by ParseRate whether or
+	// not it could be parsed, so a Resolver can log it or make sense of a
+	// format ParseRate doesn't.  It is empty for a Rate built in code, and
+	// plays no part in which allowance a Rate draws from.
+	Text string
 }
 
 // ParseRate parses a rate written <count>/<window>, e.g. 50/1m or 100/24h.
@@ -39,24 +40,24 @@ type Rate struct {
 // duration (see time.ParseDuration).  ParseRate checks only the grammar; a
 // Limiter rescales rates whose window is outside its Window Bounds.
 //
-// On failure the Rate returned is zero, with Malformed set to s.
+// The Rate returned has Text set to s.  On failure it is otherwise zero.
 func ParseRate(s string) (Rate, error) {
 	countStr, windowStr, found := strings.Cut(s, "/")
 	if !found {
-		return Rate{Malformed: s}, fmt.Errorf("%w %q: missing '/'", ErrMalformedRate, s)
+		return Rate{Text: s}, fmt.Errorf("%w %q: missing '/'", ErrMalformedRate, s)
 	}
 
 	count, err := parsePositive(countStr)
 	if err != nil {
-		return Rate{Malformed: s}, fmt.Errorf("%w %q: count: %w", ErrMalformedRate, s, err)
+		return Rate{Text: s}, fmt.Errorf("%w %q: count: %w", ErrMalformedRate, s, err)
 	}
 
 	window, err := parseWindow(windowStr)
 	if err != nil {
-		return Rate{Malformed: s}, fmt.Errorf("%w %q: window: %w", ErrMalformedRate, s, err)
+		return Rate{Text: s}, fmt.Errorf("%w %q: window: %w", ErrMalformedRate, s, err)
 	}
 
-	return Rate{Count: count, Window: window}, nil
+	return Rate{Count: count, Window: window, Text: s}, nil
 }
 
 // parsePositive parses a positive integer made only of base-10 digits, so
@@ -98,7 +99,7 @@ func parseWindow(s string) (time.Duration, error) {
 }
 
 // IsZero reports whether r is a zero Rate, one with no Count and no Window,
-// which allows nothing.  Malformed does not matter.
+// which allows nothing.  Text does not matter.
 func (r Rate) IsZero() bool {
 	return r.Count == 0 && r.Window == 0
 }
@@ -108,16 +109,23 @@ func (r Rate) valid() bool {
 	return r.Count > 0 && r.Window > 0
 }
 
-// String formats r the way ParseRate reads it, e.g. 50/1m, 600/1h or 100/24h.
-// A malformed Rate is written as it was, and any other invalid one as 0.
+// key returns r without its Text: the identity of the allowance it draws
+// from, so that 100/90m and 100/1h30m are one rate.
+func (r Rate) key() Rate {
+	return Rate{Count: r.Count, Window: r.Window}
+}
+
+// String returns the rate as the client wrote it, when r was parsed.  A Rate
+// built in code is formatted the way ParseRate reads it, e.g. 50/1m, 600/1h
+// or 100/24h, or written as nothing at all if it is invalid.
 func (r Rate) String() string {
 	switch {
+	case r.Text != "":
+		return r.Text
 	case r.valid():
 		return strconv.Itoa(r.Count) + "/" + formatWindow(r.Window)
-	case r.Malformed != "":
-		return r.Malformed
 	default:
-		return "0"
+		return ""
 	}
 }
 
@@ -135,10 +143,11 @@ func formatWindow(d time.Duration) string {
 	return s
 }
 
-// compareRates orders rates by window, then by count, so a Decision lists
-// the shortest window first.  Malformed rates, all zero, sort by their text.
+// compareRates orders rates by window, then by count, then by text, so a
+// Decision lists the shortest window first and malformed rates in a steady
+// order.
 func compareRates(a, b Rate) int {
-	return cmp.Or(cmp.Compare(a.Window, b.Window), cmp.Compare(a.Count, b.Count), cmp.Compare(a.Malformed, b.Malformed))
+	return cmp.Or(cmp.Compare(a.Window, b.Window), cmp.Compare(a.Count, b.Count), cmp.Compare(a.Text, b.Text))
 }
 
 // addRates appends to rates each of more that it doesn't already hold.
@@ -154,7 +163,8 @@ func addRates(rates []Rate, more ...Rate) []Rate {
 
 // rescale returns r expressed per window, allowing the same calls per second.
 // The count is rounded to the nearest whole call, but never below one, so a
-// rate that allowed something still does.  r and window must be valid.
+// rate that allowed something still does.  r and window must be valid.  The
+// result is no longer what the client wrote, so it has no Text.
 func (r Rate) rescale(window time.Duration) Rate {
 	// count * window / r.Window, in 128 bits so a large count can't overflow.
 	hi, lo := bits.Mul64(uint64(r.Count), uint64(window)) //nolint:gosec // positive

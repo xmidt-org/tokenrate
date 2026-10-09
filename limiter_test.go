@@ -64,11 +64,13 @@ func rateCaps(rates ...string) []string {
 	return caps
 }
 
+// mustRate parses s and drops its Text, matching how a Decision lists the
+// Caller's allowances.
 func mustRate(t *testing.T, s string) Rate {
 	t.Helper()
 	r, err := ParseRate(s)
 	require.NoError(t, err)
-	return r
+	return r.key()
 }
 
 // rates parses several rates, in the order given; none is nil.
@@ -313,7 +315,7 @@ func TestMalformed(t *testing.T) {
 			d := l.Check(ctx, "abc", rateCaps("10/0s"))
 			assert.False(t, d.Allowed)
 			assert.Equal(t, RateExceeded, d.Reason)
-			assert.Equal(t, []Rate{{Malformed: "10/0s"}}, d.Limits)
+			assert.Equal(t, []Rate{{Text: "10/0s"}}, d.Limits)
 			assert.True(t, d.Limit.IsZero())
 			assert.Zero(t, d.RetryAfter)
 			require.Len(t, d.Warnings, 1)
@@ -338,7 +340,7 @@ func TestMalformed(t *testing.T) {
 		d := l.Check(ctx, "abc", rateCaps("10/0s"))
 		assert.False(t, d.Allowed, "a broken Token is held to zero, whatever the Caller's other Tokens say")
 		assert.Equal(t, RateExceeded, d.Reason)
-		assert.Equal(t, []Rate{{Malformed: "10/0s"}}, d.Limits)
+		assert.Equal(t, []Rate{{Text: "10/0s"}}, d.Limits)
 		assert.Len(t, d.Warnings, 1)
 		assert.Equal(t, 1, l.len(), "and does not disturb what is remembered")
 	})
@@ -347,7 +349,7 @@ func TestMalformed(t *testing.T) {
 		l := newLimiter(t, newClock())
 		d := l.Check(ctx, "abc", rateCaps("10/0s", "abc/1s", "10/0s"))
 		assert.False(t, d.Allowed)
-		assert.Equal(t, []Rate{{Malformed: "10/0s"}, {Malformed: "abc/1s"}}, d.Limits, "each text once, in order")
+		assert.Equal(t, []Rate{{Text: "10/0s"}, {Text: "abc/1s"}}, d.Limits, "each text once, in order")
 		assert.Len(t, d.Warnings, 3, "but every capability is warned about")
 	})
 
@@ -475,8 +477,8 @@ func TestDefaultResolver(t *testing.T) {
 	}{
 		{name: "nothing", provided: nil, want: nil},
 		{name: "valid", provided: []Rate{five, ten}, want: []Rate{five, ten}},
-		{name: "malformed beside valid", provided: []Rate{five, {Malformed: "x"}, ten}, want: []Rate{five, ten}},
-		{name: "only malformed", provided: []Rate{{Malformed: "x"}, {Malformed: "y"}}, want: []Rate{{Malformed: "x"}, {Malformed: "y"}}},
+		{name: "malformed beside valid", provided: []Rate{five, {Text: "x"}, ten}, want: []Rate{five, ten}},
+		{name: "only malformed", provided: []Rate{{Text: "x"}, {Text: "y"}}, want: []Rate{{Text: "x"}, {Text: "y"}}},
 		{name: "zero", provided: []Rate{{}}, want: []Rate{{}}},
 	}
 
@@ -505,7 +507,9 @@ func TestResolver(t *testing.T) {
 		d := l.Check(context.WithValue(ctx, ctxKey{}, "v"), "abc", rateCaps("10/0s", "100/1ms", "5/1s", "abc/1s"))
 		assert.True(t, d.Allowed)
 		assert.Equal(t, "abc", gotPrincipal)
-		assert.Equal(t, []Rate{{Malformed: "10/0s"}, mustRate(t, "100000/1s"), mustRate(t, "5/1s"), {Malformed: "abc/1s"}}, gotRates, "within the bounds, in Token order, malformed as zero with its text")
+		five := mustRate(t, "5/1s")
+		five.Text = "5/1s"
+		assert.Equal(t, []Rate{{Text: "10/0s"}, mustRate(t, "100000/1s"), five, {Text: "abc/1s"}}, gotRates, "in Token order with the text as written, malformed as zero, rescaled without text")
 		assert.Equal(t, "v", gotValue)
 		assert.Equal(t, rates(t, "5/1s", "100000/1s"), d.Limits)
 		assert.Len(t, d.Warnings, 2)
@@ -590,8 +594,8 @@ func TestResolver(t *testing.T) {
 	t.Run("a legacy format made sense of", func(t *testing.T) {
 		l := newLimiter(t, newClock(), WithResolver(func(_ context.Context, _ string, provided []Rate) ([]Rate, error) {
 			for i, r := range provided {
-				if r.Malformed == "five per second" {
-					provided[i].Count, provided[i].Window = 5, time.Second // Malformed left set
+				if r.Text == "five per second" {
+					provided[i].Count, provided[i].Window = 5, time.Second // Text left as written
 				}
 			}
 
@@ -600,9 +604,16 @@ func TestResolver(t *testing.T) {
 
 		d := l.Check(ctx, "abc", rateCaps("five per second", "5/1s"))
 		assert.True(t, d.Allowed)
-		assert.Equal(t, rates(t, "5/1s"), d.Limits, "the text is cleared, so both spellings are one rate")
+		assert.Equal(t, rates(t, "5/1s"), d.Limits, "both spellings are one rate")
 		assert.Len(t, d.Warnings, 1, "it is still warned about")
 		assert.Equal(t, 4, allowedCount(l, "abc", rateCaps("5/1s"), 10), "and share one allowance")
+	})
+
+	t.Run("spellings share an allowance", func(t *testing.T) {
+		l := newLimiter(t, newClock())
+		assert.Equal(t, rates(t, "4/1h30m"), l.Check(ctx, "abc", rateCaps("4/90m")).Limits)
+		assert.Equal(t, rates(t, "4/1h30m"), l.Check(ctx, "abc", rateCaps("4/1h30m")).Limits)
+		assert.Equal(t, 2, allowedCount(l, "abc", rateCaps("4/5400s"), 10))
 	})
 
 	t.Run("zero refuses without denying", func(t *testing.T) {
@@ -613,7 +624,7 @@ func TestResolver(t *testing.T) {
 		assert.False(t, d.Allowed)
 		assert.Equal(t, RateExceeded, d.Reason)
 		assert.NoError(t, d.Err)
-		assert.Equal(t, []Rate{{}, mustRate(t, "10/1s")}, d.Limits, "zero sorts first")
+		assert.Equal(t, []Rate{{}, {Count: 10, Window: time.Second, Text: "10/1s"}}, d.Limits, "zero sorts first; the Token's rate as written")
 		assert.True(t, d.Limit.IsZero())
 		assert.Zero(t, d.RetryAfter, "a zero limit never recovers")
 		assert.Zero(t, l.len(), "nothing is remembered")

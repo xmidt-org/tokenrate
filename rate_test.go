@@ -31,7 +31,9 @@ func TestParseRate(t *testing.T) {
 		t.Run(tc.in, func(t *testing.T) {
 			got, err := ParseRate(tc.in)
 			require.NoError(t, err)
+			tc.want.Text = tc.in
 			assert.Equal(t, tc.want, got)
+			assert.Equal(t, tc.in, got.String(), "as the client wrote it")
 		})
 	}
 }
@@ -65,39 +67,37 @@ func TestParseRateMalformed(t *testing.T) {
 		t.Run(in, func(t *testing.T) {
 			r, err := ParseRate(in)
 			assert.ErrorIs(t, err, ErrMalformedRate)
-			assert.Equal(t, Rate{Malformed: in}, r, "the text is kept")
+			assert.Equal(t, Rate{Text: in}, r, "the text is kept")
 			assert.True(t, r.IsZero())
-			if in == "" {
-				assert.Equal(t, "0", r.String(), "nothing to show")
-			} else {
-				assert.Equal(t, in, r.String())
-			}
+			assert.Equal(t, in, r.String(), "as the client wrote it")
 		})
 	}
 }
 
+// TestRateString covers Rates built in code, which have no Text to echo
+// unless given one.
 func TestRateString(t *testing.T) {
 	tests := []struct {
 		rate Rate
 		want string
 	}{
-		{rate: Rate{}, want: "0"},
+		{rate: Rate{}, want: ""},
 		{rate: Rate{Count: 50, Window: time.Second}, want: "50/1s"},
 		{rate: Rate{Count: 600, Window: time.Minute}, want: "600/1m"},
 		{rate: Rate{Count: 2, Window: time.Hour}, want: "2/1h"},
 		{rate: Rate{Count: 4, Window: 90 * time.Minute}, want: "4/1h30m"},
 		{rate: Rate{Count: 100, Window: 24 * time.Hour}, want: "100/24h"},
 		{rate: Rate{Count: 3, Window: 1500 * time.Millisecond}, want: "3/1.5s"},
-		{rate: Rate{Count: 5, Window: time.Second, Malformed: "five per second"}, want: "5/1s"},
+		{rate: Rate{Count: 5, Window: time.Second, Text: "five per second"}, want: "five per second"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.want, func(t *testing.T) {
 			assert.Equal(t, tc.want, tc.rate.String())
-			if !tc.rate.IsZero() {
+			if tc.rate.Text == "" && !tc.rate.IsZero() {
 				parsed, err := ParseRate(tc.want)
 				require.NoError(t, err)
-				assert.Equal(t, Rate{Count: tc.rate.Count, Window: tc.rate.Window}, parsed)
+				assert.Equal(t, tc.rate, parsed.key(), "the format round-trips")
 			}
 		})
 	}
@@ -110,8 +110,8 @@ func TestCompareRates(t *testing.T) {
 		return rate
 	}
 
-	in := []Rate{r("100/24h"), {Malformed: "b"}, r("20/1s"), r("5/1m"), {}, r("5/1s"), {Malformed: "a"}, r("5/1s")}
-	want := []Rate{{}, {Malformed: "a"}, {Malformed: "b"}, r("5/1s"), r("20/1s"), r("5/1m"), r("100/24h")}
+	in := []Rate{r("100/24h"), {Text: "b"}, r("20/1s"), r("5/1m"), {}, r("5/1s"), {Text: "a"}, r("5/1s")}
+	want := []Rate{{}, {Text: "a"}, {Text: "b"}, r("5/1s"), r("20/1s"), r("5/1m"), r("100/24h")}
 
 	got := addRates(nil, in...)
 	slices.SortFunc(got, compareRates)
@@ -129,13 +129,13 @@ func TestInvalidRates(t *testing.T) {
 		rate Rate
 		str  string
 	}{
-		{name: "zero", rate: Rate{}, str: "0"},
-		{name: "malformed", rate: Rate{Malformed: "ten/1s"}, str: "ten/1s"},
-		{name: "zero count", rate: Rate{Count: 0, Window: time.Second}, str: "0"},
-		{name: "negative count", rate: Rate{Count: -1, Window: time.Second}, str: "0"},
-		{name: "zero window", rate: Rate{Count: 10, Window: 0}, str: "0"},
-		{name: "negative window", rate: Rate{Count: 10, Window: -time.Second}, str: "0"},
-		{name: "both negative", rate: Rate{Count: -10, Window: -time.Second}, str: "0"},
+		{name: "zero", rate: Rate{}, str: ""},
+		{name: "malformed", rate: Rate{Text: "ten/1s"}, str: "ten/1s"},
+		{name: "zero count", rate: Rate{Count: 0, Window: time.Second}, str: ""},
+		{name: "negative count", rate: Rate{Count: -1, Window: time.Second}, str: ""},
+		{name: "zero window", rate: Rate{Count: 10, Window: 0}, str: ""},
+		{name: "negative window", rate: Rate{Count: 10, Window: -time.Second}, str: ""},
+		{name: "both negative", rate: Rate{Count: -10, Window: -time.Second}, str: ""},
 	}
 
 	for _, tc := range tests {
