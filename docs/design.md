@@ -198,7 +198,11 @@ service supplies only the `Extractor`. For tr1d1um that is bascule:
 handler := tokenrate.Middleware{
 	Limiter: limiter,
 	Extract: func(r *http.Request) (string, []string) {
-		token, _ := bascule.Get(r.Context())
+		token, ok := bascule.Get(r.Context())
+		if !ok {
+			return "", nil // unauthenticated: the Limiter's mode decides
+		}
+
 		caps, _ := bascule.GetCapabilities(token)
 		return token.Principal(), caps
 	},

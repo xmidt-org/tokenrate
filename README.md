@@ -52,11 +52,18 @@ defer limiter.Stop()
 handler := tokenrate.Middleware{
 	Limiter: limiter,
 	Extract: func(r *http.Request) (string, []string) {
-		token, _ := bascule.Get(r.Context())
+		token, ok := bascule.Get(r.Context())
+		if !ok {
+			return "", nil // unauthenticated: the Limiter's mode decides
+		}
+
 		caps, _ := bascule.GetCapabilities(token)
 		return token.Principal(), caps
 	},
 }.Wrap(next)
+
+// With bascule's own middleware, which stores the Token in the context:
+protected := basculeMiddleware.Then(handler)
 ```
 
 Outside HTTP, call `limiter.Check(principal, capabilities)` and apply the
