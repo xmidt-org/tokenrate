@@ -31,6 +31,12 @@ go get github.com/xmidt-org/tokenrate
 
 ## Usage
 
+Place the middleware after the one that authenticates the request. It
+checks the Caller, writes one warning header per Capability Warning, and
+answers 429 Too Many Requests (with Retry-After) or 403 Forbidden itself.
+The only service-specific part is finding the principal and capabilities in
+the request:
+
 ```go
 limiter, err := tokenrate.New(
 	tokenrate.WithPrefixes("prefix:rate:"),
@@ -43,21 +49,20 @@ if err != nil {
 limiter.Start() // optional: periodically sweep idle state
 defer limiter.Stop()
 
-d := limiter.Check(token.Principal(), capabilities)
-for _, w := range d.Warnings {
-	rw.Header().Add("X-Webpa-Capability-Warning", w.String())
-}
-
-switch {
-case d.Allowed:
-	next.ServeHTTP(rw, r)
-case d.Reason == tokenrate.RateExceeded:
-	rw.Header().Set("Retry-After", seconds(d.RetryAfter)) // round up
-	rw.WriteHeader(http.StatusTooManyRequests)
-default: // tokenrate.NoRateCapability
-	rw.WriteHeader(http.StatusForbidden)
-}
+handler := tokenrate.Middleware{
+	Limiter: limiter,
+	Extract: func(r *http.Request) (string, []string) {
+		token, _ := bascule.Get(r.Context())
+		caps, _ := bascule.GetCapabilities(token)
+		return token.Principal(), caps
+	},
+}.Wrap(next)
 ```
+
+Outside HTTP, call `limiter.Check(principal, capabilities)` and apply the
+`Decision` yourself. See the
+[examples](https://pkg.go.dev/github.com/xmidt-org/tokenrate#pkg-examples)
+for both.
 
 - [CONTEXT.md](CONTEXT.md) defines the terms.
 - [docs/design.md](docs/design.md) describes the behavior.

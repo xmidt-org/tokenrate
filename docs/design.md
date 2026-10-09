@@ -16,10 +16,11 @@ the Token, but tokenrate never sees the Token itself. The service passes in
 the principal and the capability strings after authentication, and gets
 back a decision.
 
-tokenrate has **no dependency on bascule, HTTP, or JWT libraries**. The
-service decides how to apply a decision (status codes, headers, logging).
-tr1d1um, and later scytale, call it after bascule has authenticated the
-request.
+tokenrate has **no dependency on bascule or JWT libraries**. It ships an
+HTTP middleware (standard library only) that applies the decision; the
+service supplies just the function that finds the principal and
+capabilities in a request. tr1d1um, and later scytale, place it after
+bascule's middleware.
 
 ## Out of scope
 
@@ -27,8 +28,9 @@ request.
   account for the instance count.
 - **Authentication, CIDR checks, Caller Origin and endpoint checks.**
   Those are in bascule.
-- **HTTP.** No status codes, headers or middleware. Each service writes
-  that glue itself (see [Integrating](#integrating)).
+- **Extracting the Token from a request.** That depends on the service's
+  authentication library, so the service supplies it (see
+  [Integrating](#integrating)).
 - **A general-purpose rate limiter.** The bucket is an internal package.
 - **Limits scoped to a network** ("caller X from CIDR Y"). Not supported
   yet; see [Open decisions](#open-decisions).
@@ -138,6 +140,17 @@ func WithPermissiveCorrectIfPresent() Option
 // Check decides one request and spends from the Caller's allowance.
 func (l *Limiter) Check(principal string, capabilities []string) Decision
 
+// Middleware applies a Limiter to HTTP requests; Extract is the only
+// service-specific part.
+type Extractor func(*http.Request) (principal string, capabilities []string)
+type Middleware struct {
+	Limiter       *Limiter
+	Extract       Extractor
+	WarningHeader string                        // default X-Webpa-Capability-Warning
+	Observe       func(*http.Request, Decision) // optional, for metrics or logging
+}
+func (m Middleware) Wrap(next http.Handler) http.Handler
+
 type Decision struct {
 	Allowed    bool
 	Reason     Reason        // None, NoRateCapability, RateExceeded
@@ -177,29 +190,35 @@ character, so it is quoted.
 
 ## Integrating
 
-The glue lives in the service, not in tokenrate. For tr1d1um it is a small
-HTTP middleware placed **after** bascule's middleware:
+`Middleware` does the HTTP glue, so every service applies a Decision the
+same way. It is placed **after** the authentication middleware, and the
+service supplies only the `Extractor`. For tr1d1um that is bascule:
 
 ```go
-token, _ := bascule.Get(r.Context())
-caps, _ := bascule.GetCapabilities(token)
-d := limiter.Check(token.Principal(), caps)
-for _, warn := range d.Warnings {
-	w.Header().Add("X-Webpa-Capability-Warning", warn.String())
-}
-switch {
-case d.Allowed:
-	next.ServeHTTP(w, r)
-case d.Reason == tokenrate.RateExceeded:
-	w.Header().Set("Retry-After", seconds(d.RetryAfter)) // round up
-	w.WriteHeader(http.StatusTooManyRequests)
-default: // NoRateCapability
-	w.WriteHeader(http.StatusForbidden)
-}
+handler := tokenrate.Middleware{
+	Limiter: limiter,
+	Extract: func(r *http.Request) (string, []string) {
+		token, _ := bascule.Get(r.Context())
+		caps, _ := bascule.GetCapabilities(token)
+		return token.Principal(), caps
+	},
+}.Wrap(next)
 ```
 
+For each request the middleware:
+
+1. Calls `Extract`, then `Limiter.Check`.
+2. Calls `Observe`, if set, with the Decision.
+3. Adds one `WarningHeader` per Capability Warning, whether or not the
+   request goes on.
+4. Allowed → calls `next`. `RateExceeded` → 429 Too Many Requests, with
+   `Retry-After` in whole seconds rounded up when `RetryAfter` is set.
+   `NoRateCapability` → 403 Forbidden.
+
 It writes its own warning headers because bascule's middleware has already
-handed the request on by the time this runs.
+handed the request on by the time this runs. A service that is not HTTP,
+or that wants different responses, calls `Check` and applies the Decision
+itself.
 
 ## Acceptance tests
 
@@ -240,6 +259,14 @@ Behavior:
 - MaxCallers reached → the least recently used Caller is evicted.
 - Concurrent calls (`-race`) → never more than Burst allowed from a full
   allowance.
+
+Middleware:
+
+- Allowed → `next` runs, warnings in the header. `RateExceeded` → 429 with
+  `Retry-After` rounded up, or no `Retry-After` at a zero limit.
+  `NoRateCapability` → 403. Permissive → `next` runs with a `would-reject`
+  warning. `Observe` sees every Decision. A nil `Limiter` or `Extract`
+  panics in `Wrap`.
 
 ## Open decisions
 
