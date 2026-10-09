@@ -45,15 +45,14 @@ type Decision struct {
 	Reason Reason
 
 	// Limits are the rates applied, shortest window first.  The request had
-	// to fit every one.  It is empty when the Token is Unrestricted, when
-	// the Resolver denied the request, and when the Token's only Rate
-	// Capabilities were malformed and nothing else applied, which is held
-	// to a rate of zero.
+	// to fit every one.  It is empty when the Token is Unrestricted or the
+	// Resolver denied the request.  It holds the zero Rate when the Token
+	// counts as carrying it, e.g. its only Rate Capabilities were malformed.
 	Limits []Rate
 
 	// Limit is the rate that refused the request: when Reason is
 	// RateExceeded, the one of Limits with the longest wait, or the zero
-	// Rate if Limits is empty.  It is the zero Rate otherwise.
+	// Rate when that is what refused.  It is the zero Rate otherwise.
 	Limit Rate
 
 	// RetryAfter is how long until the Caller has allowance for another

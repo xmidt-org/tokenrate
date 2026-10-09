@@ -21,5 +21,5 @@ Now there are no modes. The library enforces whatever rates the Token counts as 
 ## Consequences
 
 - One failure path besides the rate itself: `Denied`, with `Err`. The middleware answers 403 Forbidden.
-- A Token whose only rates are malformed is still held to zero rather than becoming unlimited. That is not a mode; it keeps a typo from meaning no limit, as ADR 0001 decided.
+- Even the malformed-rate rule is a Resolver. A Malformed Capability reaches the Resolver as the zero rate, and `DefaultResolver` ignores it beside valid rates and holds an all-malformed Token to zero, so a typo never means no limit, as ADR 0001 decided. A deployment's Resolver inherits that by calling `DefaultResolver`, or decides differently. The library itself has no policy left: none means no limit, zero means refused, an error means denied.
 - Capability Warnings are only ever about malformed rates now.

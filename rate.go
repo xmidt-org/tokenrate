@@ -19,7 +19,8 @@ import (
 var ErrMalformedRate = errors.New("malformed rate")
 
 // Rate is a number of calls allowed per window.  Its Burst is always Count.
-// The zero Rate allows nothing.
+// The zero Rate allows nothing; it is how a Malformed Capability reaches a
+// Resolver, and how a Resolver refuses a Token without denying the Caller.
 type Rate struct {
 	Count  int
 	Window time.Duration

@@ -61,20 +61,25 @@ bascule's middleware.
 Given principal `p` and the Token's capability strings `t`:
 
 1. **Select** `t`'s capabilities that match a prefix, and parse each one.
-   Each malformed one emits a Capability Warning and is otherwise ignored.
-   Each valid one is rescaled into the Window Bounds.
-2. **Resolve:** if a Resolver is set, call it with `p` and the rates from
-   step 1. Its result is what `t` counts as carrying from here on, and is
-   trusted (no rescaling). If it errs or returns an invalid rate, fail
-   (`reason=denied`, `Err` set) and stop.
-3. **Missing:** if `t` had no Rate Capabilities and nothing was resolved,
-   allow (Unrestricted). Don't touch `p`'s allowances.
-4. **Remember:** record (or refresh) each of `t`'s rates as a Remembered
+   Each malformed one emits a Capability Warning and contributes the zero
+   rate, once. Each valid one is rescaled into the Window Bounds.
+2. **Resolve:** call the Resolver (`DefaultResolver` unless replaced) with
+   `p` and the rates from step 1, in Token order. Its result is what `t`
+   counts as carrying from here on, and is trusted (no rescaling). If it
+   errs or returns a rate that is neither valid nor zero, fail
+   (`reason=denied`, `Err` set) and stop. `DefaultResolver` drops the zero
+   when there are valid rates, and returns just the zero when there are
+   none.
+3. **Nothing:** if `t` counts as carrying no rate, allow (Unrestricted).
+   Don't touch `p`'s allowances.
+4. **Zero:** if `t` counts as carrying the zero rate, fail
+   (`reason=rate-exceeded`, no `RetryAfter`). Don't touch `p`'s
+   allowances; a broken Token is not worth remembering.
+5. **Remember:** record (or refresh) each of `t`'s rates as a Remembered
    Rate for `p`, stamped `now`. Drop any of `p`'s Remembered Rates not
    presented for more than 2× their window. The limits are every remaining
-   Remembered Rate. If there are none, `t` counted as having rates that
-   left nothing to apply, so hold it to zero (fail).
-5. **Spend:** take one call from `p`'s allowance at **every** limit. If any
+   Remembered Rate.
+6. **Spend:** take one call from `p`'s allowance at **every** limit. If any
    has no allowance left, fail (`reason=rate-exceeded`) with `Limit` the
    one with the longest wait, and spend nothing. Otherwise spend all.
 
@@ -134,7 +139,12 @@ func WithClock(func() time.Time) Option               // for tests
 
 // Resolver decides what rates a Token counts as carrying.  Ceilings,
 // Overrides, requiring a rate and blocking a Caller are written here.
+// Malformed Capabilities arrive as the zero Rate.
 type Resolver func(ctx context.Context, principal string, provided []Rate) ([]Rate, error)
+
+// DefaultResolver ignores malformed rates beside valid ones, and holds a
+// Token whose rates are all malformed to zero.
+func DefaultResolver(ctx context.Context, principal string, provided []Rate) ([]Rate, error)
 
 // Check decides one request and spends from the Caller's allowances.
 func (l *Limiter) Check(ctx context.Context, principal string, capabilities []string) Decision
@@ -245,21 +255,25 @@ Behavior:
   both Tokens; their calls draw from the same allowances.
 - A cut: Token A `20/1s`, then Token B `2/1s` once → A is held to 2.
 - After 2× the window without presenting `20/1s`, it no longer applies.
-- Only a malformed rate → every call fails, with a warning.
+- Only a malformed rate → every call fails, with a warning and the zero
+  rate in `Limits`, even if the Caller's other Tokens are remembered.
 - A malformed rate alongside a valid one → the valid one applies, and a
   warning is still emitted.
+- `DefaultResolver`: nothing → nothing; zero beside valid → the valid
+  ones; only zero → zero; never an error; its input is not modified.
 - Window Bounds `1s` to `1h`: `100/1ms` → held as `100000/1s`; `100/2h` →
   held as `50/1h`, so only 50 calls burst; `5/1s` and `5/1h` → unchanged;
   an Override of `10/1ms` still applies. With the defaults, `100/1s` →
   `6000/1m`, `100/25h` → `96/24h`, `1/720h` → `1/24h`.
 - No Rate Capability → allowed, Unrestricted, no state.
-- Resolver: sees the principal, context and the Token's valid, bounded
-  rates. A ceiling it appends applies alongside the Token's, unrescaled,
-  and is remembered. An Override it returns replaces the Token's, looser
-  or stricter, and vouches for a rateless Token. Returning nothing for a
-  rateless Token keeps it Unrestricted; returning nothing for a Token with
-  rates holds it to zero. An error, such as requiring a rate, or an
-  invalid rate → `Denied` with `Err`, nothing spent.
+- Resolver: sees the principal, context and the Token's bounded rates in
+  Token order, malformed as zero once. A ceiling it appends applies
+  alongside the Token's, unrescaled, and is remembered. An Override it
+  returns replaces the Token's, looser or stricter, and vouches for a
+  rateless Token. Returning nothing makes the Token Unrestricted, whatever
+  it carried. Returning the zero rate refuses it (`RateExceeded`, no
+  `Err`, nothing remembered). An error, such as requiring a rate, or a
+  rate neither valid nor zero → `Denied` with `Err`, nothing spent.
 - A different principal → an independent allowance.
 - MaxCallers reached → the least recently used Caller is evicted.
 - Concurrent calls (`-race`) → never more than Burst allowed from a full

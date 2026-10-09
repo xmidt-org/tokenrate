@@ -26,12 +26,13 @@ var now = time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 
 func ExampleMiddleware() {
 	// Every Token must carry a rate; the Resolver denies the ones that don't.
-	requireRate := func(_ context.Context, _ string, provided []tokenrate.Rate) ([]tokenrate.Rate, error) {
-		if len(provided) == 0 {
+	requireRate := func(ctx context.Context, principal string, provided []tokenrate.Rate) ([]tokenrate.Rate, error) {
+		rates, _ := tokenrate.DefaultResolver(ctx, principal, provided)
+		if len(rates) == 0 {
 			return nil, errors.New("no rate capability")
 		}
 
-		return provided, nil
+		return rates, nil
 	}
 
 	limiter, err := tokenrate.New(
@@ -108,16 +109,17 @@ func ExampleWithResolver() {
 
 	// The Resolver has the final say over the rates a Token counts as
 	// carrying, so the deployment's special cases live in one place.
-	resolve := func(_ context.Context, principal string, provided []tokenrate.Rate) ([]tokenrate.Rate, error) {
+	resolve := func(ctx context.Context, principal string, provided []tokenrate.Rate) ([]tokenrate.Rate, error) {
 		if override, ok := overrides[principal]; ok {
 			return override, nil // replaces whatever the Token says
 		}
 
-		if len(provided) == 0 {
+		rates, _ := tokenrate.DefaultResolver(ctx, principal, provided)
+		if len(rates) == 0 {
 			return nil, nil // a Token with no rate stays Unrestricted
 		}
 
-		return append(provided, ceiling), nil // nobody else exceeds the ceiling
+		return append(rates, ceiling), nil // nobody else exceeds the ceiling
 	}
 
 	limiter, err := tokenrate.New(

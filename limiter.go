@@ -41,8 +41,8 @@ var (
 	// configured.
 	ErrNoPrefixes = errors.New("at least one capability prefix is required")
 
-	// ErrInvalidRate is the Decision.Err when a Resolver returns a rate whose
-	// count or window is not positive, which denies the request.
+	// ErrInvalidRate is the Decision.Err when a Resolver returns a rate that
+	// is neither valid nor the zero Rate, which denies the request.
 	ErrInvalidRate = errors.New("resolver returned an invalid rate")
 )
 
@@ -68,6 +68,7 @@ type Limiter struct {
 // New creates a Limiter.  WithPrefixes is required.
 func New(opts ...Option) (*Limiter, error) {
 	l := Limiter{
+		resolve:       DefaultResolver,
 		maxCallers:    DefaultMaxCallers,
 		sweepInterval: DefaultSweepInterval,
 		minWindow:     DefaultMinWindow,
@@ -118,27 +119,30 @@ func New(opts ...Option) (*Limiter, error) {
 
 // Check decides one request from principal, whose Token carries capabilities,
 // and spends one call from each of the Caller's allowances.  ctx is passed to
-// the Resolver, if there is one.
+// the Resolver.
 func (l *Limiter) Check(ctx context.Context, principal string, capabilities []string) Decision {
 	var d Decision
-	token, present := l.selectRates(capabilities, &d.Warnings)
+	provided := l.selectRates(capabilities, &d.Warnings)
 
-	if l.resolve != nil {
-		resolved, err := l.resolveRates(ctx, principal, token)
-		if err != nil {
-			d.Err = err
-			d.Reason = Denied
-			return d
-		}
-
-		token = resolved
-		present = present || len(token) > 0
+	token, err := l.resolveRates(ctx, principal, provided)
+	if err != nil {
+		d.Err = err
+		d.Reason = Denied
+		return d
 	}
 
-	// A Token that carries no rate, and that the Resolver gave none, is
-	// Unrestricted.
-	if !present {
+	// A Token that counts as carrying no rate is Unrestricted.
+	if len(token) == 0 {
 		d.Allowed = true
+		return d
+	}
+
+	// One that counts as carrying the zero Rate allows nothing.  That is not
+	// worth remembering, so it creates no state.
+	if slices.Contains(token, Rate{}) {
+		slices.SortFunc(token, compareRates)
+		d.Limits = token
+		d.Reason = RateExceeded
 		return d
 	}
 
@@ -150,43 +154,24 @@ func (l *Limiter) Check(ctx context.Context, principal string, capabilities []st
 
 	s.sweepOldest(now)
 
-	// A Caller with nothing to remember gets no state, so a Token whose only
-	// rates are malformed creates none.
-	c := s.get(principal, len(token) > 0)
-
-	var applied []Rate
-	if c != nil {
-		c.remember(token, now)
-		c.prune(now)
-		applied = c.applied(now)
-	}
-
-	// The Token counts as carrying rates, so leaving nothing to apply holds
-	// it to zero: a typo in the only rate must not mean no limit.
-	if len(applied) == 0 {
-		if c != nil && len(c.allowances) == 0 {
-			s.remove(c)
-		}
-
-		d.Reason = RateExceeded
-		return d
-	}
-
-	l.spend(c, applied, now, &d)
+	c := s.get(principal)
+	c.remember(token, now)
+	c.prune(now)
+	l.spend(c, c.applied(now), now, &d)
 	return d
 }
 
 // resolveRates asks the Resolver what rates the Token counts as carrying,
-// and checks that each is valid.
-func (l *Limiter) resolveRates(ctx context.Context, principal string, token []Rate) ([]Rate, error) {
-	resolved, err := l.resolve(ctx, principal, token)
+// and checks that each is valid or zero.
+func (l *Limiter) resolveRates(ctx context.Context, principal string, provided []Rate) ([]Rate, error) {
+	resolved, err := l.resolve(ctx, principal, provided)
 	if err != nil {
 		return nil, err
 	}
 
 	var rates []Rate
 	for _, r := range resolved {
-		if !r.valid() {
+		if !r.valid() && !r.IsZero() {
 			return nil, fmt.Errorf("%w: %+v", ErrInvalidRate, r)
 		}
 
@@ -197,9 +182,9 @@ func (l *Limiter) resolveRates(ctx context.Context, principal string, token []Ra
 }
 
 // selectRates finds the capabilities that match a prefix and returns their
-// valid rates, held within the Window Bounds, and whether any matched at all.
-// Each malformed one adds a warning.
-func (l *Limiter) selectRates(capabilities []string, warnings *[]Warning) (rates []Rate, present bool) {
+// rates, held within the Window Bounds, in Token order.  Each malformed one
+// adds a warning and contributes the zero Rate, once.
+func (l *Limiter) selectRates(capabilities []string, warnings *[]Warning) (rates []Rate) {
 	for _, c := range capabilities {
 		for _, re := range l.prefixes {
 			m := re.FindStringSubmatch(c)
@@ -207,9 +192,9 @@ func (l *Limiter) selectRates(capabilities []string, warnings *[]Warning) (rates
 				continue
 			}
 
-			present = true
 			if r, err := ParseRate(m[len(m)-1]); err != nil {
 				*warnings = append(*warnings, malformedWarning(c))
+				rates = addRates(rates, Rate{})
 			} else {
 				rates = addRates(rates, l.bound(r))
 			}
@@ -218,7 +203,7 @@ func (l *Limiter) selectRates(capabilities []string, warnings *[]Warning) (rates
 		}
 	}
 
-	return rates, present
+	return rates
 }
 
 // bound returns r rescaled to the nearer Window Bound if its window is
@@ -359,16 +344,12 @@ type shard struct {
 }
 
 // get returns the state for principal and marks it most recently used.  If
-// there is none, it returns nil unless create is set, in which case it adds
-// empty state, evicting the least recently used Caller if the shard is full.
-func (s *shard) get(principal string, create bool) *caller {
+// there is none, it adds empty state, evicting the least recently used Caller
+// if the shard is full.
+func (s *shard) get(principal string) *caller {
 	if e, ok := s.callers[principal]; ok {
 		s.lru.MoveToFront(e)
 		return e.Value.(*caller)
-	}
-
-	if !create {
-		return nil
 	}
 
 	c := &caller{

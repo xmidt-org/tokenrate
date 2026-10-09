@@ -133,14 +133,20 @@ func TestInvalidRates(t *testing.T) {
 			assert.False(t, tc.rate.valid())
 			assert.Equal(t, "0", tc.rate.String())
 
-			// A Resolver may not return one.
+			// A Resolver may return the zero Rate, which refuses, but no
+			// other invalid one.
 			l, err := New(WithPrefixes("p:"), WithResolver(func(context.Context, string, []Rate) ([]Rate, error) {
 				return []Rate{valid, tc.rate}, nil
 			}))
 			require.NoError(t, err)
 			d := l.Check(context.Background(), "abc", []string{"p:1/1m"})
-			assert.Equal(t, Denied, d.Reason)
-			assert.ErrorIs(t, d.Err, ErrInvalidRate)
+			if tc.rate.IsZero() {
+				assert.Equal(t, RateExceeded, d.Reason)
+				assert.NoError(t, d.Err)
+			} else {
+				assert.Equal(t, Denied, d.Reason)
+				assert.ErrorIs(t, d.Err, ErrInvalidRate)
+			}
 		})
 	}
 }

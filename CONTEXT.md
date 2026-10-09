@@ -29,7 +29,7 @@ A configured string or regular expression that selects which **Capabilities** ar
 A **Capability** (e.g. `{prefix}50/1m`) stating how many calls a **Caller** may make per window against **one instance** of the service. Fleet-wide throughput is roughly that × the number of instances; issuers do that math.
 
 **Malformed Capability**:
-A **Rate Capability** whose rate cannot be parsed. It is warned about and ignored, but still counts as present (so the **Token** is not **Unrestricted**); a Token whose Rate Capabilities are all malformed, with no other **Caller Rates**, is held to a rate of zero.
+A **Rate Capability** whose rate cannot be parsed. It is warned about, and reaches the **Resolver** as the zero rate, which allows nothing. The default Resolver ignores it when the Token has valid rates and holds a Token whose rates are all malformed to zero, so a typo never means no limit; a deployment's own Resolver may decide otherwise.
 
 **Denied**:
 The **Resolver** returned an error, or an invalid rate, so the request is refused whatever the Token says. It is how a deployment requires a rate, blocks a Caller, or refuses anything else it decides to. The error is returned to the service to log, not shown to the Caller.
@@ -47,7 +47,7 @@ _Avoid_: Caller Rate (singular; the old largest-wins rule)
 One rate a **Caller** has presented, as a **Rate Capability** or as the **Resolver** decided, kept so it keeps applying to every request the Caller makes, whichever Token they carry. It is forgotten once no request has presented it for twice its window.
 
 **Resolver**:
-A function the deployment supplies with the final say over the rates a **Token** counts as carrying. It sees the principal and the Token's valid rates and returns the rates to use, which are trusted (not subject to the **Window Bounds**) and treated exactly as if the Token had carried them. It is where ceilings, **Overrides** and vouching for rateless Callers live, instead of in this library.
+A function with the final say over the rates a **Token** counts as carrying. It sees the principal and the Token's rates, **Malformed Capabilities** as zero, and returns the rates to use, which are trusted (not subject to the **Window Bounds**) and treated exactly as if the Token had carried them: none means **Unrestricted**, zero means refused, an error means **Denied**. The default Resolver only handles malformed rates; a deployment supplies its own for ceilings, **Overrides**, requiring a rate and blocking Callers, instead of this library having an option for each.
 
 **Burst**:
 How many calls a **Caller** may make at once from a full allowance. For one rate it is always the count: `100/24h` allows 100 calls immediately, then refills over the day. With several rates, the smallest count bounds it.

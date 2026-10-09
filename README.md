@@ -74,7 +74,9 @@ the `Decision` yourself.
 
 A `Resolver` has the final say over the rates a Token counts as carrying,
 so policy lives in your code, not in options. The library always enforces
-what it returns: no rates means no limit, and an error denies the request.
+what it returns: no rates means no limit, the zero rate refuses, and an
+error denies the request. `DefaultResolver` only handles malformed rates;
+call it from yours to keep that.
 
 ```go
 tokenrate.WithResolver(func(ctx context.Context, principal string, provided []tokenrate.Rate) ([]tokenrate.Rate, error) {
@@ -82,11 +84,12 @@ tokenrate.WithResolver(func(ctx context.Context, principal string, provided []to
 		return override, nil // replaces whatever the Token says
 	}
 
-	if len(provided) == 0 {
+	rates, _ := tokenrate.DefaultResolver(ctx, principal, provided)
+	if len(rates) == 0 {
 		return nil, errors.New("no rate capability") // every Token must carry a rate
 	}
 
-	return append(provided, ceiling), nil // nobody exceeds the ceiling
+	return append(rates, ceiling), nil // nobody exceeds the ceiling
 })
 ```
 

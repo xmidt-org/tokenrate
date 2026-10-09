@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"time"
 )
 
@@ -63,14 +64,17 @@ func WithPrefixes(prefixes ...string) Option {
 
 // A Resolver has the final say over the rates a Token counts as carrying.  It
 // is called on every check, outside any lock, with the request's context, the
-// Token's principal and its valid Rate Capabilities, held within the Window
-// Bounds.  Whatever it returns is used instead, as if the Token had carried
+// Token's principal and the rates of its Rate Capabilities, in Token order
+// and held within the Window Bounds.  A Malformed Capability arrives as the
+// zero Rate, which allows nothing; it appears at most once.
+//
+// Whatever the Resolver returns is used instead, as if the Token had carried
 // those rates: they are remembered for the Caller, and they are trusted, so
 // the Window Bounds do not apply.  Returning no rates leaves the Token
-// Unrestricted.
-// Returning an error denies the request, whatever the reason: the error is
-// returned in the Decision for the service to log, and is not shown to the
-// Caller.
+// Unrestricted.  Returning the zero Rate refuses the request as RateExceeded,
+// with nothing remembered.  Returning an error denies the request, whatever
+// the reason: the error is returned in the Decision for the service to log,
+// and is not shown to the Caller.
 //
 // That covers the policy a deployment needs, without options for each case:
 //
@@ -80,12 +84,30 @@ func WithPrefixes(prefixes ...string) Option {
 //   - Vouching for a Caller whose Token has no rate: return rates for it.
 //   - Blocking a Caller: return an error.
 //
-// A rate whose count or window is not positive also denies the request, with
-// ErrInvalidRate.
+// A Resolver that wants DefaultResolver's handling of malformed rates calls
+// it first and adjusts its result.  Returning a rate that is neither valid
+// nor zero denies the request with ErrInvalidRate.
 type Resolver func(ctx context.Context, principal string, provided []Rate) ([]Rate, error)
 
-// WithResolver sets the Resolver.  Without one, a Token's Rate Capabilities
-// are used as they are.
+// DefaultResolver is the Resolver unless WithResolver says otherwise.  It
+// ignores a Malformed Capability when the Token has valid rates, so a typo
+// in one rate doesn't void the others, and holds a Token whose rates are all
+// malformed to the zero Rate, so a typo never means no limit.  It never
+// returns an error.
+func DefaultResolver(_ context.Context, _ string, provided []Rate) ([]Rate, error) {
+	if len(provided) == 0 {
+		return nil, nil
+	}
+
+	valid := slices.DeleteFunc(slices.Clone(provided), Rate.IsZero)
+	if len(valid) == 0 {
+		return []Rate{{}}, nil
+	}
+
+	return valid, nil
+}
+
+// WithResolver sets the Resolver, replacing DefaultResolver.
 func WithResolver(r Resolver) Option {
 	return optionFunc(func(l *Limiter) error {
 		if r == nil {

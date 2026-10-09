@@ -6,6 +6,7 @@ package tokenrate
 import (
 	"context"
 	"errors"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -295,7 +296,7 @@ func TestForgottenRateKeepsItsSpentAllowance(t *testing.T) {
 	c.Advance(200 * time.Millisecond)
 	d := l.Check(ctx, "abc", rateCaps("5/1s"))
 	assert.Equal(t, rates(t, "5/1s"), d.Limits, "2/1s is forgotten")
-	assert.Len(t, l.shard("abc").get("abc", false).allowances, 2, "but its allowance is not full, so it is kept")
+	assert.Len(t, l.shard("abc").get("abc").allowances, 2, "but its allowance is not full, so it is kept")
 
 	// Presenting it again finds that allowance rather than a fresh burst.
 	d = l.Check(ctx, "abc", rateCaps("2/1s"))
@@ -312,7 +313,7 @@ func TestMalformed(t *testing.T) {
 			d := l.Check(ctx, "abc", rateCaps("10/0s"))
 			assert.False(t, d.Allowed)
 			assert.Equal(t, RateExceeded, d.Reason)
-			assert.Empty(t, d.Limits)
+			assert.Equal(t, []Rate{{}}, d.Limits)
 			assert.True(t, d.Limit.IsZero())
 			assert.Zero(t, d.RetryAfter)
 			require.Len(t, d.Warnings, 1)
@@ -335,38 +336,21 @@ func TestMalformed(t *testing.T) {
 		l := newLimiter(t, newClock())
 		l.Check(ctx, "abc", rateCaps("5/1s"))
 		d := l.Check(ctx, "abc", rateCaps("10/0s"))
-		assert.True(t, d.Allowed)
-		assert.Equal(t, rates(t, "5/1s"), d.Limits)
-		assert.Len(t, d.Warnings, 1)
-	})
-
-	t.Run("after a remembered rate is forgotten", func(t *testing.T) {
-		c := newClock()
-		l := newLimiter(t, c, WithMaxCallers(10)) // one shard, so def guards the LRU tail
-
-		l.Check(ctx, "def", rateCaps("5/1h"))
-		l.Check(ctx, "abc", rateCaps("5/1s"))
-		assert.Equal(t, 2, l.len())
-
-		// abc's only rate ages out and its allowance refills, but it is not
-		// the least recently used, so the check itself finds it.
-		c.Advance(2*time.Second + time.Nanosecond)
-		d := l.Check(ctx, "abc", rateCaps("10/0s"))
-		assert.False(t, d.Allowed)
+		assert.False(t, d.Allowed, "a broken Token is held to zero, whatever the Caller's other Tokens say")
 		assert.Equal(t, RateExceeded, d.Reason)
-		assert.Empty(t, d.Limits)
-		assert.True(t, d.Limit.IsZero())
-		assert.Zero(t, d.RetryAfter)
+		assert.Equal(t, []Rate{{}}, d.Limits)
 		assert.Len(t, d.Warnings, 1)
-		assert.Equal(t, 1, l.len(), "abc carries no information and is dropped")
+		assert.Equal(t, 1, l.len(), "and does not disturb what is remembered")
 	})
 
-	t.Run("with a resolver adding a rate", func(t *testing.T) {
-		l := newLimiter(t, newClock(), WithResolver(ceiling(mustRate(t, "3/1s"))))
+	t.Run("with a resolver that drops the zero", func(t *testing.T) {
+		l := newLimiter(t, newClock(), WithResolver(func(ctx context.Context, p string, provided []Rate) ([]Rate, error) {
+			return DefaultResolver(ctx, p, slices.DeleteFunc(provided, Rate.IsZero))
+		}))
 		d := l.Check(ctx, "abc", rateCaps("10/0s"))
-		assert.True(t, d.Allowed, "the resolver's rate is what applies")
-		assert.Equal(t, rates(t, "3/1s"), d.Limits)
-		assert.Len(t, d.Warnings, 1)
+		assert.True(t, d.Allowed, "the resolver decided the Token is Unrestricted")
+		assert.Empty(t, d.Limits)
+		assert.Len(t, d.Warnings, 1, "it is still warned about")
 	})
 }
 
@@ -406,7 +390,7 @@ func TestWindowBounds(t *testing.T) {
 		l.Check(ctx, "abc", rateCaps("5/1ms"))
 		l.Check(ctx, "abc", rateCaps("500/100ms"))
 		assert.Equal(t, rates(t, "1/1s", "5/1s", "5000/1s"), l.Check(ctx, "abc", rateCaps("1/1s")).Limits)
-		assert.Len(t, l.shard("abc").get("abc", false).allowances, 3)
+		assert.Len(t, l.shard("abc").get("abc").allowances, 3)
 	})
 
 	t.Run("burst is bounded by the maximum window", func(t *testing.T) {
@@ -463,10 +447,38 @@ func TestUnrestricted(t *testing.T) {
 	assert.Zero(t, l.len(), "an Unrestricted Token doesn't touch the allowance")
 }
 
-// ceiling is a Resolver that adds rates to every Token's.
+// ceiling is a Resolver that adds rates to every Token's, on top of what
+// DefaultResolver makes of them.
 func ceiling(rates ...Rate) Resolver {
-	return func(_ context.Context, _ string, provided []Rate) ([]Rate, error) {
-		return append(provided, rates...), nil
+	return func(ctx context.Context, principal string, provided []Rate) ([]Rate, error) {
+		resolved, err := DefaultResolver(ctx, principal, provided)
+		return append(resolved, rates...), err
+	}
+}
+
+func TestDefaultResolver(t *testing.T) {
+	five := Rate{Count: 5, Window: time.Second}
+	ten := Rate{Count: 10, Window: time.Second}
+
+	tests := []struct {
+		name     string
+		provided []Rate
+		want     []Rate
+	}{
+		{name: "nothing", provided: nil, want: nil},
+		{name: "valid", provided: []Rate{five, ten}, want: []Rate{five, ten}},
+		{name: "malformed beside valid", provided: []Rate{five, {}, ten}, want: []Rate{five, ten}},
+		{name: "only malformed", provided: []Rate{{}}, want: []Rate{{}}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			before := slices.Clone(tc.provided)
+			got, err := DefaultResolver(ctx, "abc", tc.provided)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+			assert.Equal(t, before, tc.provided, "provided is not modified")
+		})
 	}
 }
 
@@ -478,16 +490,16 @@ func TestResolver(t *testing.T) {
 		var gotValue any
 		l := newLimiter(t, newClock(), WithResolver(func(ctx context.Context, principal string, provided []Rate) ([]Rate, error) {
 			gotPrincipal, gotRates, gotValue = principal, provided, ctx.Value(ctxKey{})
-			return provided, nil
+			return DefaultResolver(ctx, principal, provided)
 		}))
 
-		d := l.Check(context.WithValue(ctx, ctxKey{}, "v"), "abc", rateCaps("10/0s", "100/1ms", "5/1s"))
+		d := l.Check(context.WithValue(ctx, ctxKey{}, "v"), "abc", rateCaps("10/0s", "100/1ms", "5/1s", "abc/1s"))
 		assert.True(t, d.Allowed)
 		assert.Equal(t, "abc", gotPrincipal)
-		assert.Equal(t, rates(t, "100000/1s", "5/1s"), gotRates, "valid, within the bounds, in Token order")
+		assert.Equal(t, []Rate{{}, mustRate(t, "100000/1s"), mustRate(t, "5/1s")}, gotRates, "within the bounds, in Token order, malformed as zero once")
 		assert.Equal(t, "v", gotValue)
 		assert.Equal(t, rates(t, "5/1s", "100000/1s"), d.Limits)
-		assert.Len(t, d.Warnings, 1)
+		assert.Len(t, d.Warnings, 2)
 	})
 
 	t.Run("ceiling", func(t *testing.T) {
@@ -561,10 +573,23 @@ func TestResolver(t *testing.T) {
 	t.Run("nothing resolved for a token with rates", func(t *testing.T) {
 		l := newLimiter(t, newClock(), WithResolver(func(context.Context, string, []Rate) ([]Rate, error) { return nil, nil }))
 		d := l.Check(ctx, "abc", rateCaps("10/1s"))
-		assert.False(t, d.Allowed)
-		assert.Equal(t, RateExceeded, d.Reason, "the Token had rates, so it is held to zero")
+		assert.True(t, d.Allowed, "the resolver made the Token Unrestricted")
 		assert.Empty(t, d.Limits)
 		assert.Zero(t, l.len())
+	})
+
+	t.Run("zero refuses without denying", func(t *testing.T) {
+		l := newLimiter(t, newClock(), WithResolver(func(_ context.Context, _ string, provided []Rate) ([]Rate, error) {
+			return append(provided, Rate{}), nil
+		}))
+		d := l.Check(ctx, "abc", rateCaps("10/1s"))
+		assert.False(t, d.Allowed)
+		assert.Equal(t, RateExceeded, d.Reason)
+		assert.NoError(t, d.Err)
+		assert.Equal(t, []Rate{{}, mustRate(t, "10/1s")}, d.Limits, "zero sorts first")
+		assert.True(t, d.Limit.IsZero())
+		assert.Zero(t, d.RetryAfter, "a zero limit never recovers")
+		assert.Zero(t, l.len(), "nothing is remembered")
 	})
 
 	t.Run("denied", func(t *testing.T) {
