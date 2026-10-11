@@ -214,7 +214,7 @@ handler := tokenrate.Middleware{
 	Extract: func(r *http.Request) (string, []string) {
 		token, ok := bascule.Get(r.Context())
 		if !ok {
-			return "", nil // unauthenticated: the Limiter's mode decides
+			return "", nil // unauthenticated: Unrestricted unless the Resolver says otherwise
 		}
 
 		caps, _ := bascule.GetCapabilities(token)

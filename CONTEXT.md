@@ -63,7 +63,7 @@ The state of a **Token** with no **Rate Capability**, for which the **Resolver**
 _Avoid_: Required, Correct If Present, Permissive, Enforcing (the old modes)
 
 **Capability Warning**:
-A note for the **Caller** describing a problem with their **Token** or request, e.g. a **Malformed Capability** or a limit that would have been exceeded. Returned whether or not the request is blocked.
+A note for the **Caller** describing a problem with their **Token** or request, e.g. a **Malformed Capability**. Returned whether or not the request is blocked.
 
 ## Example dialogue
 

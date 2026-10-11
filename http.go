@@ -16,7 +16,8 @@ const DefaultWarningHeader = "X-Webpa-Capability-Warning"
 // Extractor returns the principal and capabilities of an authenticated
 // request, however the service stores them, e.g. from the Token in the
 // request's context.  Returning an empty principal and no capabilities for an
-// unauthenticated request lets the Limiter's mode decide what to do with it.
+// unauthenticated request leaves it Unrestricted, unless the Resolver returns
+// rates for it or denies it.
 type Extractor func(*http.Request) (principal string, capabilities []string)
 
 // Middleware applies a Limiter to HTTP requests.  Place it after the
