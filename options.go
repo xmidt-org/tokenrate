@@ -20,14 +20,6 @@ const (
 	// DefaultSweepInterval is how often a started Limiter sweeps expired
 	// state unless WithSweepInterval says otherwise.
 	DefaultSweepInterval = time.Minute
-
-	// DefaultMinWindow is the shortest window a Rate Capability may have
-	// unless WithMinWindow says otherwise.
-	DefaultMinWindow = time.Minute
-
-	// DefaultMaxWindow is the longest window a Rate Capability may have
-	// unless WithMaxWindow says otherwise.
-	DefaultMaxWindow = 24 * time.Hour
 )
 
 // Option configures a Limiter.
@@ -64,14 +56,13 @@ func WithPrefixes(prefixes ...string) Option {
 
 // A Resolver has the final say over the rates a Token counts as carrying.  It
 // is called on every check, outside any lock, with the request's context, the
-// Token's principal and the rates of its Rate Capabilities, in Token order
-// and held within the Window Bounds.  Each reads back as the client wrote it
-// from String.  A Malformed Capability arrives as a zero Rate, which allows
-// nothing.
+// Token's principal and the rates of its Rate Capabilities, in Token order and
+// as parsed.  Each reads back as the client wrote it from String.  A Malformed
+// Capability arrives as a zero Rate, which allows nothing.
 //
 // Whatever the Resolver returns is used instead, as if the Token had carried
 // those rates: they are remembered for the Caller, and they are trusted, so
-// the Window Bounds do not apply.  Returning no rates leaves the Token
+// they are used as returned.  Returning no rates leaves the Token
 // Unrestricted.  Returning a zero Rate refuses the request as RateExceeded,
 // with nothing remembered.  Returning an error denies the request, whatever
 // the reason: the error is returned in the Decision for the service to log,
@@ -85,23 +76,47 @@ func WithPrefixes(prefixes ...string) Option {
 //   - Vouching for a Caller whose Token has no rate: return rates for it.
 //   - Blocking a Caller: return an error.
 //
-// A Resolver that wants DefaultResolver's handling of malformed rates calls
-// it first and adjusts its result.  Returning a rate that is neither valid
+// A Resolver that wants DefaultResolver's handling of malformed rates and
+// Window Bounds calls it first and adjusts its result.  Returning a rate that is neither valid
 // nor zero denies the request with ErrInvalidRate.
 type Resolver func(ctx context.Context, principal string, provided []Rate) ([]Rate, error)
 
 // DefaultResolver is the Resolver unless WithResolver says otherwise.  It
 // ignores a Malformed Capability when the Token has valid rates, so a typo
 // in one rate doesn't void the others, and holds a Token whose rates are all
-// malformed to those zero Rates, so a typo never means no limit.  It never
-// returns an error.
+// malformed to those zero Rates, so a typo never means no limit.
+//
+// It also holds each valid rate within the Window Bounds, one minute to 24
+// hours.  A rate outside them is rescaled to the nearer bound at the same
+// calls per second, rounded to the nearest call but at least one, so 100/1s
+// is held as 6000/1m and 100/48h as 50/24h.  This keeps a tiny window from
+// churning state and a long one from allowing a huge Burst at once.  A
+// rescaled rate is no longer what the client wrote, so it reads back
+// formatted.
+//
+// It never returns an error.
 func DefaultResolver(_ context.Context, _ string, provided []Rate) ([]Rate, error) {
+	return defaultResolve(provided, time.Minute, 24*time.Hour), nil
+}
+
+// defaultResolve is DefaultResolver with its Window Bounds as arguments, so
+// tests can use short windows.
+func defaultResolve(provided []Rate, minWindow, maxWindow time.Duration) []Rate {
 	valid := slices.DeleteFunc(slices.Clone(provided), Rate.IsZero)
 	if len(valid) == 0 {
-		return provided, nil
+		return provided
 	}
 
-	return valid, nil
+	for i, r := range valid {
+		switch {
+		case r.Window < minWindow:
+			valid[i] = r.rescale(minWindow)
+		case r.Window > maxWindow:
+			valid[i] = r.rescale(maxWindow)
+		}
+	}
+
+	return valid
 }
 
 // WithResolver sets the Resolver, replacing DefaultResolver.
@@ -139,40 +154,6 @@ func WithSweepInterval(d time.Duration) Option {
 		}
 
 		l.sweepInterval = d
-		return nil
-	})
-}
-
-// WithMinWindow sets the shortest window a Rate Capability may have.  A
-// rate with a shorter window is rescaled to the minimum at the same calls
-// per second, so a 100/1s under a one minute minimum is held as 6000/1m.
-// This spreads a tiny window's refills over a sensible period, and keeps
-// its Remembered Rate long enough to matter.  Overrides are trusted and are
-// not rescaled.  The default is DefaultMinWindow.
-func WithMinWindow(d time.Duration) Option {
-	return optionFunc(func(l *Limiter) error {
-		if d <= 0 {
-			return errors.New("min window must be positive")
-		}
-
-		l.minWindow = d
-		return nil
-	})
-}
-
-// WithMaxWindow sets the longest window a Rate Capability may have.  A rate
-// with a longer window is rescaled to the maximum at the same calls per
-// second, rounded to the nearest call but at least one, so a 100/48h under
-// a 24 hour maximum is held as 50/24h.  This bounds the Burst a long window
-// would otherwise allow at once.  Overrides are trusted and are not rescaled.
-// The default is DefaultMaxWindow.
-func WithMaxWindow(d time.Duration) Option {
-	return optionFunc(func(l *Limiter) error {
-		if d <= 0 {
-			return errors.New("max window must be positive")
-		}
-
-		l.maxWindow = d
 		return nil
 	})
 }

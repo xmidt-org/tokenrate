@@ -49,11 +49,11 @@ bascule's middleware.
   `1h30m` or `24h`. Days (`1d`) are not a unit.
 - Anything else is **malformed**: a missing `/`, `0/1s`, `10/0s`, `-5/1s`,
   `abc/1s`, `10/1x` or `10/1d`.
-- A deployment bounds the window (`WithMinWindow`, `WithMaxWindow`; the
-  defaults are `1m` and `24h`). A rate whose window is outside the bounds
-  is rescaled to the nearer bound at the same calls per second, rounded to
-  the nearest call but never below one: `100/1s` is held as `6000/1m`, and
-  `100/48h` as `50/24h`. Overrides are exempt.
+- `DefaultResolver` bounds the window to `1m`–`24h`. A rate whose window
+  is outside the bounds is rescaled to the nearer bound at the same calls
+  per second, rounded to the nearest call but never below one: `100/1s` is
+  held as `6000/1m`, and `100/48h` as `50/24h`. A deployment wanting other
+  bounds, or none, writes its own Resolver.
 - A Token may carry several rates. Every one applies.
 
 ## Behavior on each request
@@ -62,16 +62,15 @@ Given principal `p` and the Token's capability strings `t`:
 
 1. **Select** `t`'s capabilities that match a prefix, and parse each one,
    keeping the text as the client wrote it. Each malformed one emits a
-   Capability Warning and contributes a zero rate. Each valid one is
-   rescaled into the Window Bounds, which drops the text if the rate
-   changed. Duplicates are dropped.
+   Capability Warning and contributes a zero rate. Duplicates are dropped.
 2. **Resolve:** call the Resolver (`DefaultResolver` unless replaced) with
    `p` and the rates from step 1, in Token order. Its result is what `t`
    counts as carrying from here on, and is trusted (no rescaling). If it
    errs or returns a rate that is neither valid nor zero, fail
    (`reason=denied`, `Err` set) and stop. `DefaultResolver` drops the zero
    when there are valid rates, and returns just the zero when there are
-   none.
+   none. It rescales valid rates into the Window Bounds, which drops the
+   text of any it changes.
 3. **Nothing:** if `t` counts as carrying no rate, allow (Unrestricted).
    Don't touch `p`'s allowances.
 4. **Zero:** if `t` counts as carrying the zero rate, fail
@@ -136,8 +135,6 @@ func New(opts ...Option) (*Limiter, error)
 func WithPrefixes(prefixes ...string) Option         // required; none = error from New
 func WithResolver(r Resolver) Option                  // the final say over a Token's rates
 func WithMaxCallers(n int) Option
-func WithMinWindow(d time.Duration) Option            // default 1m
-func WithMaxWindow(d time.Duration) Option            // default 24h
 func WithClock(func() time.Time) Option               // for tests
 
 // Resolver decides what rates a Token counts as carrying.  Ceilings,
@@ -267,14 +264,14 @@ Behavior:
   warning is still emitted.
 - `DefaultResolver`: nothing → nothing; zero beside valid → the valid
   ones; only zeros → those zeros; never an error; its input is not
-  modified.
-- Window Bounds `1s` to `1h`: `100/1ms` → held as `100000/1s`; `100/2h` →
-  held as `50/1h`, so only 50 calls burst; `5/1s` and `5/1h` → unchanged;
-  an Override of `10/1ms` still applies. With the defaults, `100/1s` →
-  `6000/1m`, `100/25h` → `96/24h`, `1/720h` → `1/24h`.
+  modified. Window Bounds: `100/1s` → `6000/1m`, `100/25h` → `96/24h`,
+  `1/720h` → `1/24h`, `5/1m` and `5/24h` → unchanged.
+- The same rule with bounds `1s` to `1h`: `100/1ms` → held as `100000/1s`;
+  `100/2h` → held as `50/1h`, so only 50 calls burst; a rate the Resolver
+  adds, such as `10/1ms`, applies unrescaled.
 - No Rate Capability → allowed, Unrestricted, no state.
-- Resolver: sees the principal, context and the Token's bounded rates in
-  Token order, malformed as zero once. A ceiling it appends applies
+- Resolver: sees the principal, context and the Token's rates as parsed,
+  in Token order, malformed as zero once. A ceiling it appends applies
   alongside the Token's, unrescaled, and is remembered. An Override it
   returns replaces the Token's, looser or stricter, and vouches for a
   rateless Token. Returning nothing makes the Token Unrestricted, whatever

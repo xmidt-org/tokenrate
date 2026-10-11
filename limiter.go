@@ -53,8 +53,6 @@ type Limiter struct {
 	resolve       Resolver
 	maxCallers    int
 	sweepInterval time.Duration
-	minWindow     time.Duration
-	maxWindow     time.Duration
 	now           func() time.Time
 
 	seed   maphash.Seed
@@ -71,8 +69,6 @@ func New(opts ...Option) (*Limiter, error) {
 		resolve:       DefaultResolver,
 		maxCallers:    DefaultMaxCallers,
 		sweepInterval: DefaultSweepInterval,
-		minWindow:     DefaultMinWindow,
-		maxWindow:     DefaultMaxWindow,
 		now:           time.Now,
 		seed:          maphash.MakeSeed(),
 	}
@@ -90,10 +86,6 @@ func New(opts ...Option) (*Limiter, error) {
 
 	if len(l.prefixes) == 0 {
 		errs = append(errs, ErrNoPrefixes)
-	}
-
-	if l.minWindow > l.maxWindow {
-		errs = append(errs, fmt.Errorf("min window %v exceeds max window %v", l.minWindow, l.maxWindow))
 	}
 
 	if err := errors.Join(errs...); err != nil {
@@ -182,7 +174,7 @@ func (l *Limiter) resolveRates(ctx context.Context, principal string, provided [
 }
 
 // selectRates finds the capabilities that match a prefix and returns their
-// rates, held within the Window Bounds, in Token order.  Each malformed one
+// rates, in Token order.  Each malformed one
 // adds a warning and contributes a zero Rate.  Each carries its text.
 func (l *Limiter) selectRates(capabilities []string, warnings *[]Warning) (rates []Rate) {
 	for _, c := range capabilities {
@@ -195,8 +187,6 @@ func (l *Limiter) selectRates(capabilities []string, warnings *[]Warning) (rates
 			r, err := ParseRate(m[len(m)-1])
 			if err != nil {
 				*warnings = append(*warnings, malformedWarning(c))
-			} else {
-				r = l.bound(r)
 			}
 
 			rates = addRates(rates, r)
@@ -206,20 +196,6 @@ func (l *Limiter) selectRates(capabilities []string, warnings *[]Warning) (rates
 	}
 
 	return rates
-}
-
-// bound returns r rescaled to the nearer Window Bound if its window is
-// outside them, otherwise r.  The calls per second are kept, so a 100/1s
-// under a one minute minimum becomes 6000/1m.
-func (l *Limiter) bound(r Rate) Rate {
-	switch {
-	case r.Window < l.minWindow:
-		return r.rescale(l.minWindow)
-	case r.Window > l.maxWindow:
-		return r.rescale(l.maxWindow)
-	default:
-		return r
-	}
 }
 
 // spend takes one call from each of c's allowances at rates, which must not

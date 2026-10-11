@@ -43,12 +43,23 @@ func (c *clock) Advance(d time.Duration) {
 	c.now = c.now.Add(d)
 }
 
-// newLimiter builds a Limiter for tests.  The minimum window is lowered to
-// a second so tests can use short windows; TestDefaultWindowBounds covers
-// the real default.
+// bounded is DefaultResolver with other Window Bounds.
+func bounded(minWindow, maxWindow time.Duration) Resolver {
+	return func(_ context.Context, _ string, provided []Rate) ([]Rate, error) {
+		return defaultResolve(provided, minWindow, maxWindow), nil
+	}
+}
+
+// testResolver is DefaultResolver with the minimum window lowered to a
+// second, so tests can use short windows; TestDefaultWindowBounds covers the
+// real bounds.
+var testResolver = bounded(time.Second, 24*time.Hour)
+
+// newLimiter builds a Limiter for tests, using testResolver unless opts
+// replace it.
 func newLimiter(t *testing.T, c *clock, opts ...Option) *Limiter {
 	t.Helper()
-	opts = append([]Option{WithPrefixes(prefix), WithClock(c.Now), WithMinWindow(time.Second)}, opts...)
+	opts = append([]Option{WithPrefixes(prefix), WithClock(c.Now), WithResolver(testResolver)}, opts...)
 	l, err := New(opts...)
 	require.NoError(t, err)
 	return l
@@ -113,10 +124,6 @@ func TestNew(t *testing.T) {
 		{name: "nil resolver", opts: []Option{WithPrefixes(prefix), WithResolver(nil)}, wantErr: "resolver"},
 		{name: "bad max callers", opts: []Option{WithPrefixes(prefix), WithMaxCallers(0)}, wantErr: "max callers"},
 		{name: "bad sweep interval", opts: []Option{WithPrefixes(prefix), WithSweepInterval(0)}, wantErr: "sweep interval"},
-		{name: "bad min window", opts: []Option{WithPrefixes(prefix), WithMinWindow(0)}, wantErr: "min window must"},
-		{name: "bad max window", opts: []Option{WithPrefixes(prefix), WithMaxWindow(-time.Second)}, wantErr: "max window must"},
-		{name: "min window above max window", opts: []Option{WithPrefixes(prefix), WithMinWindow(2 * time.Hour), WithMaxWindow(time.Hour)}, wantErr: "exceeds max window"},
-		{name: "min window equal to max window", opts: []Option{WithPrefixes(prefix), WithMinWindow(time.Hour), WithMaxWindow(time.Hour)}},
 		{name: "nil clock", opts: []Option{WithPrefixes(prefix), WithClock(nil)}, wantErr: "clock"},
 		{name: "nil option", opts: []Option{nil, WithPrefixes(prefix)}},
 		{
@@ -126,8 +133,6 @@ func TestNew(t *testing.T) {
 				WithResolver(func(_ context.Context, _ string, r []Rate) ([]Rate, error) { return r, nil }),
 				WithMaxCallers(10),
 				WithSweepInterval(time.Second),
-				WithMinWindow(time.Second),
-				WithMaxWindow(time.Hour),
 			},
 		},
 	}
@@ -355,7 +360,7 @@ func TestMalformed(t *testing.T) {
 
 	t.Run("with a resolver that drops the zero", func(t *testing.T) {
 		l := newLimiter(t, newClock(), WithResolver(func(ctx context.Context, p string, provided []Rate) ([]Rate, error) {
-			return DefaultResolver(ctx, p, slices.DeleteFunc(provided, Rate.IsZero))
+			return testResolver(ctx, p, slices.DeleteFunc(provided, Rate.IsZero))
 		}))
 		d := l.Check(ctx, "abc", rateCaps("10/0s"))
 		assert.True(t, d.Allowed, "the resolver decided the Token is Unrestricted")
@@ -365,7 +370,7 @@ func TestMalformed(t *testing.T) {
 }
 
 func TestWindowBounds(t *testing.T) {
-	bounds := []Option{WithMinWindow(time.Second), WithMaxWindow(time.Hour)}
+	bounds := []Option{WithResolver(bounded(time.Second, time.Hour))}
 
 	t.Run("shorter than the minimum", func(t *testing.T) {
 		l := newLimiter(t, newClock(), bounds...)
@@ -408,9 +413,12 @@ func TestWindowBounds(t *testing.T) {
 		assert.Equal(t, 5, allowedCount(l, "abc", rateCaps("10/2h"), 10), "10/2h is held as 5/1h")
 	})
 
-	t.Run("resolved rates are exempt", func(t *testing.T) {
-		opts := append(bounds, WithResolver(ceiling(mustRate(t, "10/1ms"), mustRate(t, "10/2h"))))
-		l := newLimiter(t, newClock(), opts...)
+	t.Run("rates the resolver adds are not bounded", func(t *testing.T) {
+		resolve := bounded(time.Second, time.Hour)
+		l := newLimiter(t, newClock(), WithResolver(func(ctx context.Context, p string, provided []Rate) ([]Rate, error) {
+			resolved, err := resolve(ctx, p, provided)
+			return append(resolved, mustRate(t, "10/1ms"), mustRate(t, "10/2h")), err
+		}))
 		d := l.Check(ctx, "abc", rateCaps("100/1ms"))
 		assert.Equal(t, rates(t, "10/1ms", "100000/1s", "10/2h"), d.Limits, "the Token's rate is rescaled, the resolver's are not")
 	})
@@ -458,17 +466,17 @@ func TestUnrestricted(t *testing.T) {
 }
 
 // ceiling is a Resolver that adds rates to every Token's, on top of what
-// DefaultResolver makes of them.
+// testResolver makes of them.
 func ceiling(rates ...Rate) Resolver {
 	return func(ctx context.Context, principal string, provided []Rate) ([]Rate, error) {
-		resolved, err := DefaultResolver(ctx, principal, provided)
+		resolved, err := testResolver(ctx, principal, provided)
 		return append(resolved, rates...), err
 	}
 }
 
 func TestDefaultResolver(t *testing.T) {
-	five := Rate{Count: 5, Window: time.Second}
-	ten := Rate{Count: 10, Window: time.Second}
+	five := Rate{Count: 5, Window: time.Minute}
+	ten := Rate{Count: 10, Window: time.Hour}
 
 	tests := []struct {
 		name     string
@@ -480,6 +488,7 @@ func TestDefaultResolver(t *testing.T) {
 		{name: "malformed beside valid", provided: []Rate{five, {text: "x"}, ten}, want: []Rate{five, ten}},
 		{name: "only malformed", provided: []Rate{{text: "x"}, {text: "y"}}, want: []Rate{{text: "x"}, {text: "y"}}},
 		{name: "zero", provided: []Rate{{}}, want: []Rate{{}}},
+		{name: "outside the bounds", provided: []Rate{{Count: 100, Window: time.Second, text: "100/1s"}, five, {Count: 100, Window: 48 * time.Hour, text: "100/48h"}}, want: []Rate{{Count: 6000, Window: time.Minute}, five, {Count: 50, Window: 24 * time.Hour}}},
 	}
 
 	for _, tc := range tests {
@@ -501,15 +510,15 @@ func TestResolver(t *testing.T) {
 		var gotValue any
 		l := newLimiter(t, newClock(), WithResolver(func(ctx context.Context, principal string, provided []Rate) ([]Rate, error) {
 			gotPrincipal, gotRates, gotValue = principal, provided, ctx.Value(ctxKey{})
-			return DefaultResolver(ctx, principal, provided)
+			return testResolver(ctx, principal, provided)
 		}))
 
 		d := l.Check(context.WithValue(ctx, ctxKey{}, "v"), "abc", rateCaps("10/0s", "100/1ms", "5/1s", "abc/1s"))
 		assert.True(t, d.Allowed)
 		assert.Equal(t, "abc", gotPrincipal)
-		five := mustRate(t, "5/1s")
-		five.text = "5/1s"
-		assert.Equal(t, []Rate{{text: "10/0s"}, mustRate(t, "100000/1s"), five, {text: "abc/1s"}}, gotRates, "in Token order with the text as written, malformed as zero, rescaled without text")
+		fast, five := mustRate(t, "100/1ms"), mustRate(t, "5/1s")
+		fast.text, five.text = "100/1ms", "5/1s"
+		assert.Equal(t, []Rate{{text: "10/0s"}, fast, five, {text: "abc/1s"}}, gotRates, "in Token order as parsed, with the text as written and malformed as zero")
 		assert.Equal(t, "v", gotValue)
 		assert.Equal(t, rates(t, "5/1s", "100000/1s"), d.Limits)
 		assert.Len(t, d.Warnings, 2)
@@ -690,7 +699,7 @@ func TestPrefixes(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			l, err := New(WithPrefixes(tc.prefixes...), WithClock(newClock().Now), WithMinWindow(time.Second))
+			l, err := New(WithPrefixes(tc.prefixes...), WithClock(newClock().Now), WithResolver(testResolver))
 			require.NoError(t, err)
 
 			d := l.Check(ctx, "abc", tc.caps)
