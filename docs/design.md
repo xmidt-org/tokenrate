@@ -135,7 +135,6 @@ func New(opts ...Option) (*Limiter, error)
 func WithPrefixes(prefixes ...string) Option         // required; none = error from New
 func WithResolver(r Resolver) Option                  // the final say over a Token's rates
 func WithMaxCallers(n int) Option
-func WithClock(func() time.Time) Option               // for tests
 
 // Resolver decides what rates a Token counts as carrying.  Ceilings,
 // Overrides, requiring a rate and blocking a Caller are written here.

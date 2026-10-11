@@ -53,7 +53,6 @@ type Limiter struct {
 	resolve       Resolver
 	maxCallers    int
 	sweepInterval time.Duration
-	now           func() time.Time
 
 	seed   maphash.Seed
 	shards []*shard
@@ -69,7 +68,6 @@ func New(opts ...Option) (*Limiter, error) {
 		resolve:       DefaultResolver,
 		maxCallers:    DefaultMaxCallers,
 		sweepInterval: DefaultSweepInterval,
-		now:           time.Now,
 		seed:          maphash.MakeSeed(),
 	}
 
@@ -138,7 +136,7 @@ func (l *Limiter) Check(ctx context.Context, principal string, capabilities []st
 		return d
 	}
 
-	now := l.now()
+	now := time.Now()
 	s := l.shard(principal)
 
 	s.mu.Lock()
@@ -296,7 +294,7 @@ func (l *Limiter) run(stop <-chan struct{}, done chan<- struct{}) {
 func (l *Limiter) sweep() {
 	for _, s := range l.shards {
 		s.mu.Lock()
-		s.sweep(l.now())
+		s.sweep(time.Now())
 		s.mu.Unlock()
 	}
 }

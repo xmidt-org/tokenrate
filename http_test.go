@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -38,90 +39,95 @@ func newRequest(principal string, caps ...string) *http.Request {
 }
 
 func TestMiddleware(t *testing.T) {
-	c := newClock()
-	l := newLimiter(t, c)
+	synctest.Test(t, func(t *testing.T) {
+		l := newLimiter(t)
 
-	var observed []Decision
-	served := 0
-	h := Middleware{
-		Limiter: l,
-		Extract: headerExtractor,
-		Observe: func(_ *http.Request, d Decision) { observed = append(observed, d) },
-	}.Wrap(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		served++
-		w.WriteHeader(http.StatusNoContent)
-	}))
+		var observed []Decision
+		served := 0
+		h := Middleware{
+			Limiter: l,
+			Extract: headerExtractor,
+			Observe: func(_ *http.Request, d Decision) { observed = append(observed, d) },
+		}.Wrap(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			served++
+			w.WriteHeader(http.StatusNoContent)
+		}))
 
-	// Two calls at 2/1s pass; the third is refused with a one second wait.
-	for range 2 {
+		// Two calls at 2/1s pass; the third is refused with a one second wait.
+		for range 2 {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, newRequest("abc", "2/1s"))
+			assert.Equal(t, http.StatusNoContent, rec.Code)
+			assert.Empty(t, rec.Header().Values(DefaultWarningHeader))
+		}
+
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, newRequest("abc", "2/1s"))
+		assert.Equal(t, http.StatusTooManyRequests, rec.Code)
+		assert.Equal(t, "1", rec.Header().Get("Retry-After"), "500ms rounds up to a second")
+		assert.Equal(t, 2, served)
+
+		// Warnings are written whether or not the request goes on.
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, newRequest("def", "10/0s", "5/1s"))
 		assert.Equal(t, http.StatusNoContent, rec.Code)
-		assert.Empty(t, rec.Header().Values(DefaultWarningHeader))
-	}
+		assert.Equal(t, []string{`malformed; kind=rate; cap="prefix:rate:10/0s"`}, rec.Header().Values(DefaultWarningHeader))
 
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, newRequest("abc", "2/1s"))
-	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
-	assert.Equal(t, "1", rec.Header().Get("Retry-After"), "500ms rounds up to a second")
-	assert.Equal(t, 2, served)
+		// A zero limit never recovers, so there is no Retry-After.
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, newRequest("ghi", "10/0s"))
+		assert.Equal(t, http.StatusTooManyRequests, rec.Code)
+		assert.Empty(t, rec.Header().Get("Retry-After"))
+		assert.Len(t, rec.Header().Values(DefaultWarningHeader), 1)
 
-	// Warnings are written whether or not the request goes on.
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, newRequest("def", "10/0s", "5/1s"))
-	assert.Equal(t, http.StatusNoContent, rec.Code)
-	assert.Equal(t, []string{`malformed; kind=rate; cap="prefix:rate:10/0s"`}, rec.Header().Values(DefaultWarningHeader))
-
-	// A zero limit never recovers, so there is no Retry-After.
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, newRequest("ghi", "10/0s"))
-	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
-	assert.Empty(t, rec.Header().Get("Retry-After"))
-	assert.Len(t, rec.Header().Values(DefaultWarningHeader), 1)
-
-	require.Len(t, observed, 5)
-	assert.Equal(t, RateExceeded, observed[2].Reason)
-	assert.Equal(t, time.Second/2, observed[2].RetryAfter)
+		require.Len(t, observed, 5)
+		assert.Equal(t, RateExceeded, observed[2].Reason)
+		assert.Equal(t, time.Second/2, observed[2].RetryAfter)
+	})
 }
 
 func TestMiddlewareDenied(t *testing.T) {
-	denied := errors.New("a rate is required")
-	l := newLimiter(t, newClock(), WithResolver(func(_ context.Context, _ string, provided []Rate) ([]Rate, error) {
-		if len(provided) == 0 {
-			return nil, denied
-		}
+	synctest.Test(t, func(t *testing.T) {
+		denied := errors.New("a rate is required")
+		l := newLimiter(t, WithResolver(func(_ context.Context, _ string, provided []Rate) ([]Rate, error) {
+			if len(provided) == 0 {
+				return nil, denied
+			}
 
-		return provided, nil
-	}))
+			return provided, nil
+		}))
 
-	var observed Decision
-	h := Middleware{
-		Limiter: l,
-		Extract: headerExtractor,
-		Observe: func(_ *http.Request, d Decision) { observed = d },
-	}.Wrap(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+		var observed Decision
+		h := Middleware{
+			Limiter: l,
+			Extract: headerExtractor,
+			Observe: func(_ *http.Request, d Decision) { observed = d },
+		}.Wrap(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
 
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, newRequest("abc"))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
-	assert.Empty(t, rec.Header(), "the error is not shown to the Caller")
-	assert.ErrorIs(t, observed.Err, denied, "Observe gets the error to log")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, newRequest("abc"))
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+		assert.Empty(t, rec.Header(), "the error is not shown to the Caller")
+		assert.ErrorIs(t, observed.Err, denied, "Observe gets the error to log")
 
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, newRequest("abc", "5/1s"))
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, newRequest("abc", "5/1s"))
+		assert.Equal(t, http.StatusNoContent, rec.Code)
+	})
 }
 
 func TestMiddlewareMisconfigured(t *testing.T) {
-	l := newLimiter(t, newClock())
-	next := http.NotFoundHandler()
+	synctest.Test(t, func(t *testing.T) {
+		l := newLimiter(t)
+		next := http.NotFoundHandler()
 
-	assert.PanicsWithValue(t, "tokenrate: Middleware.Limiter is nil", func() {
-		Middleware{Extract: headerExtractor}.Wrap(next)
-	})
+		assert.PanicsWithValue(t, "tokenrate: Middleware.Limiter is nil", func() {
+			Middleware{Extract: headerExtractor}.Wrap(next)
+		})
 
-	assert.PanicsWithValue(t, "tokenrate: Middleware.Extract is nil", func() {
-		Middleware{Limiter: l}.Wrap(next)
+		assert.PanicsWithValue(t, "tokenrate: Middleware.Extract is nil", func() {
+			Middleware{Limiter: l}.Wrap(next)
+		})
 	})
 }
 

@@ -157,15 +157,3 @@ func WithSweepInterval(d time.Duration) Option {
 		return nil
 	})
 }
-
-// WithClock sets the source of the current time, for tests.
-func WithClock(now func() time.Time) Option {
-	return optionFunc(func(l *Limiter) error {
-		if now == nil {
-			return errors.New("clock cannot be nil")
-		}
-
-		l.now = now
-		return nil
-	})
-}

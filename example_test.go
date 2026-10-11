@@ -21,9 +21,6 @@ func principalAndCapabilities(r *http.Request) (string, []string) {
 	return r.Header.Get("Principal"), strings.Split(r.Header.Get("Capabilities"), ",")
 }
 
-// A fixed clock keeps the example's output stable.
-var now = time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
-
 func ExampleMiddleware() {
 	// Every Token must carry a rate; the Resolver denies the ones that don't.
 	requireRate := func(ctx context.Context, principal string, provided []tokenrate.Rate) ([]tokenrate.Rate, error) {
@@ -38,7 +35,6 @@ func ExampleMiddleware() {
 	limiter, err := tokenrate.New(
 		tokenrate.WithPrefixes("prefix:rate:"),
 		tokenrate.WithResolver(requireRate),
-		tokenrate.WithClock(func() time.Time { return now }),
 	)
 	if err != nil {
 		panic(err)
