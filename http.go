@@ -24,8 +24,9 @@ type Extractor func(*http.Request) (principal string, capabilities []string)
 // middleware that authenticates the request, since it needs the Token's
 // principal and capabilities.
 //
-// For each request it checks the Caller and adds one WarningHeader per
-// Capability Warning, whether or not the request goes on.  An allowed request
+// For each request it checks the Caller and, unless OmitWarnings is set, adds
+// one WarningHeader per Capability Warning, whether or not the request goes
+// on.  An allowed request
 // is passed to the next handler.  A rejected one gets 429 Too Many Requests,
 // with Retry-After when waiting would help, or 403 Forbidden when the
 // Resolver denied it, which Observe can log from Decision.Err.
@@ -39,6 +40,10 @@ type Middleware struct {
 	// WarningHeader is the header Capability Warnings are written to.  Empty
 	// means DefaultWarningHeader.
 	WarningHeader string
+
+	// OmitWarnings, if set, writes no Capability Warnings.  Observe still
+	// sees them in the Decision.
+	OmitWarnings bool
 
 	// Observe, if set, is called with every Decision, for metrics or
 	// logging.  It runs before the response is written.
@@ -68,8 +73,10 @@ func (m Middleware) Wrap(next http.Handler) http.Handler {
 			m.Observe(r, d)
 		}
 
-		for _, warning := range d.Warnings {
-			w.Header().Add(m.WarningHeader, warning.String())
+		if !m.OmitWarnings {
+			for _, warning := range d.Warnings {
+				w.Header().Add(m.WarningHeader, warning.String())
+			}
 		}
 
 		switch {

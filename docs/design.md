@@ -167,6 +167,7 @@ type Middleware struct {
 	Limiter       *Limiter
 	Extract       Extractor
 	WarningHeader string                        // default X-Webpa-Capability-Warning
+	OmitWarnings  bool                          // write no warning headers
 	Observe       func(*http.Request, Decision) // optional, for metrics or logging
 }
 func (m Middleware) Wrap(next http.Handler) http.Handler
@@ -234,8 +235,8 @@ For each request the middleware:
 
 1. Calls `Extract`, then `Limiter.Check`.
 2. Calls `Observe`, if set, with the Decision.
-3. Adds one `WarningHeader` per Capability Warning, whether or not the
-   request goes on.
+3. Unless `OmitWarnings` is set, adds one `WarningHeader` per Capability
+   Warning, whether or not the request goes on.
 4. Allowed → calls `next`. `RateExceeded` → 429 Too Many Requests, with
    `Retry-After` in whole seconds rounded up when `RetryAfter` is set.
    `Denied` → 403 Forbidden; `Observe` sees `Err`.

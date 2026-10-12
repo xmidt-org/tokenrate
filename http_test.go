@@ -86,6 +86,24 @@ func TestMiddleware(t *testing.T) {
 	})
 }
 
+func TestMiddlewareOmitWarnings(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var observed Decision
+		h := Middleware{
+			Limiter:      newLimiter(t),
+			Extract:      headerExtractor,
+			OmitWarnings: true,
+			Observe:      func(_ *http.Request, d Decision) { observed = d },
+		}.Wrap(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, newRequest("abc", "10/0s", "5/1s"))
+		assert.Equal(t, http.StatusNoContent, rec.Code)
+		assert.Empty(t, rec.Header().Values(DefaultWarningHeader))
+		assert.Len(t, observed.Warnings, 1, "Observe still sees the warning")
+	})
+}
+
 func TestMiddlewareDenied(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		denied := errors.New("a rate is required")
