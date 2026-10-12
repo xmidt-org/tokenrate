@@ -12,27 +12,23 @@
 package tokenrate
 
 import (
-	"container/list"
 	"context"
 	"errors"
 	"fmt"
-	"hash/maphash"
+	"math"
 	"regexp"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xmidt-org/tokenrate/internal/gcra"
 )
 
 const (
-	// maxShards bounds how many locks the Callers are spread over.
-	maxShards = 64
-
-	// minCallersPerShard keeps small limiters in few shards, so the least
-	// recently used Caller evicted is close to the least recently used
-	// overall.
-	minCallersPerShard = 1024
+	// minSweepGap is the least time between sweeps, so Callers expiring one
+	// after another don't have the Limiter swept on every check.
+	minSweepGap = time.Minute
 )
 
 // Errors from New and Check.
@@ -48,27 +44,41 @@ var (
 
 // Limiter decides, for each request, whether its Caller is within their
 // Caller Rates.  It is safe for concurrent use.
+//
+// It keeps state for each Caller whose Token carries a rate, until twice
+// the longest window after their last request: at most 48 hours under
+// DefaultResolver.  There is no cap on how many Callers it tracks, since
+// forgetting a Caller early would give them a fresh allowance.
+//
+// It needs no starting or stopping.  A check that finds expired state starts
+// a goroutine to sweep it, unless one is running, which exits when done.
 type Limiter struct {
-	prefixes      []*regexp.Regexp
-	resolve       Resolver
-	maxCallers    int
-	sweepInterval time.Duration
+	prefixes []*regexp.Regexp
+	resolve  Resolver
 
-	seed   maphash.Seed
-	shards []*shard
+	// callers holds each tracked Caller's state, by principal.  Looking up
+	// a Caller takes no lock; checking one locks only that Caller.
+	callers sync.Map // of string to *caller
 
-	runMu sync.Mutex
-	stop  chan struct{}
-	done  chan struct{}
+	// due is the earliest a Caller may expire, in Unix nanoseconds, or
+	// noneDue if there are none.  No Caller expires before it, though one
+	// may last longer.
+	due atomic.Int64
+
+	// swept is when the Limiter was last swept, in Unix nanoseconds.
+	swept atomic.Int64
+
+	// tidying is whether a tidy goroutine is running.
+	tidying atomic.Bool
 }
+
+// noneDue is Limiter.due when no Caller is tracked: no time reaches it.
+const noneDue = math.MaxInt64
 
 // New creates a Limiter.  WithPrefixes is required.
 func New(opts ...Option) (*Limiter, error) {
 	l := Limiter{
-		resolve:       DefaultResolver,
-		maxCallers:    DefaultMaxCallers,
-		sweepInterval: DefaultSweepInterval,
-		seed:          maphash.MakeSeed(),
+		resolve: DefaultResolver,
 	}
 
 	var errs []error
@@ -90,20 +100,7 @@ func New(opts ...Option) (*Limiter, error) {
 		return nil, err
 	}
 
-	n := min(max(l.maxCallers/minCallersPerShard, 1), maxShards)
-	l.shards = make([]*shard, n)
-	for i := range l.shards {
-		size := l.maxCallers / n
-		if i < l.maxCallers%n {
-			size++
-		}
-
-		l.shards[i] = &shard{
-			max:     size,
-			callers: make(map[string]*list.Element),
-		}
-	}
-
+	l.due.Store(noneDue)
 	return &l, nil
 }
 
@@ -137,18 +134,34 @@ func (l *Limiter) Check(ctx context.Context, principal string, capabilities []st
 	}
 
 	now := time.Now()
-	s := l.shard(principal)
+	if l.isDue(now) {
+		l.startTidy()
+	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	for {
+		c, added := l.get(principal)
 
-	s.sweepOldest(now)
+		c.mu.Lock()
+		if c.forgotten {
+			// Forgotten since it was looked up, so it is no longer in
+			// callers: look again.
+			c.mu.Unlock()
+			continue
+		}
 
-	c := s.get(principal)
-	c.remember(token, now)
-	c.prune(now)
-	l.spend(c, c.applied(now), now, &d)
-	return d
+		c.remember(token, now)
+		c.prune(now)
+		l.spend(c, c.applied(now), now, &d)
+
+		// Using a Caller only makes their state last longer, so only a new
+		// one can bring the next sweep forward.
+		if added {
+			l.expect(c.expiry())
+		}
+
+		c.mu.Unlock()
+		return d
+	}
 }
 
 // resolveRates asks the Resolver what rates the Token counts as carrying,
@@ -234,149 +247,108 @@ func (l *Limiter) spend(c *caller, rates []Rate, now time.Time, d *Decision) {
 	d.Allowed = true
 }
 
-func (l *Limiter) shard(principal string) *shard {
-	if len(l.shards) == 1 {
-		return l.shards[0]
+// get returns the state for principal, adding empty state if there is none
+// and reporting that it was added.
+func (l *Limiter) get(principal string) (c *caller, added bool) {
+	if v, ok := l.callers.Load(principal); ok {
+		return v.(*caller), false
 	}
 
-	return l.shards[maphash.String(l.seed, principal)%uint64(len(l.shards))]
+	v, loaded := l.callers.LoadOrStore(principal, &caller{
+		principal:  principal,
+		allowances: make(map[Rate]*allowance, 1),
+	})
+
+	return v.(*caller), !loaded
 }
 
-// Start begins sweeping expired state every sweep interval, until Stop is
-// called.  Expired state is also dropped lazily as Callers are checked, so
-// Start is optional; it bounds how long idle state is kept.  Starting a
-// started Limiter does nothing.
-func (l *Limiter) Start() {
-	l.runMu.Lock()
-	defer l.runMu.Unlock()
-
-	if l.stop != nil {
-		return
+// forget drops c, whose lock must be held, and marks it forgotten, so a check
+// that looked it up meanwhile looks again.
+func (l *Limiter) forget(c *caller) {
+	if !c.forgotten {
+		c.forgotten = true
+		l.callers.CompareAndDelete(c.principal, c)
 	}
-
-	l.stop = make(chan struct{})
-	l.done = make(chan struct{})
-	go l.run(l.stop, l.done)
 }
 
-// Stop ends sweeping, and waits for a sweep in progress to finish.  Stopping
-// a stopped Limiter does nothing.
-func (l *Limiter) Stop() {
-	l.runMu.Lock()
-	defer l.runMu.Unlock()
-
-	if l.stop == nil {
-		return
-	}
-
-	close(l.stop)
-	<-l.done
-	l.stop, l.done = nil, nil
+// isDue reports whether a Caller may have expired, at least minSweepGap
+// after the last sweep.  On most checks it is not, and costs two atomic
+// loads.
+func (l *Limiter) isDue(now time.Time) bool {
+	n := now.UnixNano()
+	return n >= l.due.Load() && n-l.swept.Load() >= int64(minSweepGap)
 }
 
-func (l *Limiter) run(stop <-chan struct{}, done chan<- struct{}) {
-	defer close(done)
-
-	t := time.NewTicker(l.sweepInterval)
-	defer t.Stop()
-
+// expect notes that a Caller expires at t.
+func (l *Limiter) expect(t time.Time) {
+	n := t.UnixNano()
 	for {
-		select {
-		case <-stop:
+		due := l.due.Load()
+		if n >= due || l.due.CompareAndSwap(due, n) {
 			return
-		case <-t.C:
-			l.sweep()
 		}
 	}
 }
 
-// sweep drops every Caller whose state no longer carries information.
-func (l *Limiter) sweep() {
-	for _, s := range l.shards {
-		s.mu.Lock()
-		s.sweep(time.Now())
-		s.mu.Unlock()
+// startTidy starts a goroutine to sweep the Limiter, unless one is already
+// running, so no check waits for a sweep.
+func (l *Limiter) startTidy() {
+	if l.tidying.CompareAndSwap(false, true) {
+		go l.tidy()
 	}
+}
+
+// tidy sweeps the Limiter if it is due, then exits.  It drops every Caller
+// whose state no longer carries information, and notes when the rest expire.
+// It locks one Caller at a time, so checks carry on while it works.
+func (l *Limiter) tidy() {
+	defer l.tidying.Store(false)
+
+	now := time.Now()
+	if !l.isDue(now) {
+		return
+	}
+
+	// Callers added from here on note their own expiry, and the sweep notes
+	// the rest.
+	l.swept.Store(now.UnixNano())
+	l.due.Store(noneDue)
+	l.callers.Range(func(_, v any) bool {
+		c := v.(*caller)
+		c.mu.Lock()
+		defer c.mu.Unlock()
+
+		if c.prune(now) {
+			l.forget(c)
+		} else if !c.forgotten {
+			l.expect(c.expiry())
+		}
+
+		return true
+	})
 }
 
 // len returns how many Callers are tracked.
 func (l *Limiter) len() int {
 	n := 0
-	for _, s := range l.shards {
-		s.mu.Lock()
-		n += s.lru.Len()
-		s.mu.Unlock()
-	}
+	l.callers.Range(func(_, _ any) bool {
+		n++
+		return true
+	})
 
 	return n
-}
-
-// shard holds some of the Callers, in least recently used order.
-type shard struct {
-	mu      sync.Mutex
-	max     int
-	callers map[string]*list.Element
-	lru     list.List // of *caller; the front is the most recently used
-}
-
-// get returns the state for principal and marks it most recently used.  If
-// there is none, it adds empty state, evicting the least recently used Caller
-// if the shard is full.
-func (s *shard) get(principal string) *caller {
-	if e, ok := s.callers[principal]; ok {
-		s.lru.MoveToFront(e)
-		return e.Value.(*caller)
-	}
-
-	c := &caller{
-		principal:  principal,
-		allowances: make(map[Rate]*allowance, 1),
-	}
-
-	s.callers[principal] = s.lru.PushFront(c)
-	for s.lru.Len() > s.max {
-		s.remove(s.lru.Back().Value.(*caller))
-	}
-
-	return c
-}
-
-func (s *shard) remove(c *caller) {
-	if e, ok := s.callers[c.principal]; ok {
-		s.lru.Remove(e)
-		delete(s.callers, c.principal)
-	}
-}
-
-// sweepOldest drops the least recently used Caller if its state has expired.
-// Doing this on every check keeps idle state from piling up between sweeps.
-func (s *shard) sweepOldest(now time.Time) {
-	e := s.lru.Back()
-	if e == nil {
-		return
-	}
-
-	if c := e.Value.(*caller); c.prune(now) {
-		s.remove(c)
-	}
-}
-
-func (s *shard) sweep(now time.Time) {
-	for e := s.lru.Front(); e != nil; {
-		next := e.Next()
-		if c := e.Value.(*caller); c.prune(now) {
-			s.remove(c)
-		}
-
-		e = next
-	}
 }
 
 // caller is the state kept for one Caller: an allowance per rate, keyed by
 // Rate.key.
 type caller struct {
-	principal  string
+	principal string
+
+	mu         sync.Mutex
 	allowances map[Rate]*allowance
+
+	// forgotten is whether the Caller has been dropped from the Limiter.
+	forgotten bool
 }
 
 // allowance is the state of one rate for one Caller.
@@ -430,6 +402,22 @@ func (c *caller) applied(now time.Time) []Rate {
 
 	slices.SortFunc(rates, compareRates)
 	return rates
+}
+
+// expiry returns when c's state will carry no information if c makes no
+// more requests: when every rate is forgotten and its allowance is full.
+func (c *caller) expiry() time.Time {
+	var t time.Time
+	for r, a := range c.allowances {
+		// Written so that twice a very long window can't overflow.
+		for _, at := range []time.Time{a.seen.Add(r.Window).Add(r.Window), a.tat} {
+			if at.After(t) {
+				t = at
+			}
+		}
+	}
+
+	return t
 }
 
 // prune drops the allowances that carry no information: their rate is no

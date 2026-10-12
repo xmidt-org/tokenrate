@@ -40,9 +40,6 @@ func ExampleMiddleware() {
 		panic(err)
 	}
 
-	limiter.Start() // optional: periodically sweep idle state
-	defer limiter.Stop()
-
 	handler := tokenrate.Middleware{
 		Limiter: limiter,
 		Extract: principalAndCapabilities,

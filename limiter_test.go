@@ -79,6 +79,31 @@ func rates(t *testing.T, ss ...string) []Rate {
 	return out
 }
 
+// callerOf returns the state kept for principal, without marking it used.
+func callerOf(l *Limiter, principal string) *caller {
+	v, _ := l.callers.Load(principal)
+	return v.(*caller)
+}
+
+// dueAt returns when the Limiter is next due a sweep, or the zero time if
+// no Caller is tracked.
+func dueAt(l *Limiter) time.Time {
+	if n := l.due.Load(); n != noneDue {
+		return time.Unix(0, n)
+	}
+
+	return time.Time{}
+}
+
+// sweptAt returns when the Limiter was last swept, or the zero time.
+func sweptAt(l *Limiter) time.Time {
+	if n := l.swept.Load(); n != 0 {
+		return time.Unix(0, n)
+	}
+
+	return time.Time{}
+}
+
 // allowedCount makes n checks and returns how many were allowed.
 func allowedCount(l *Limiter, principal string, caps []string, n int) int {
 	allowed := 0
@@ -102,16 +127,12 @@ func TestNew(t *testing.T) {
 		{name: "empty prefixes", opts: []Option{WithPrefixes()}, wantErr: ErrNoPrefixes.Error()},
 		{name: "bad regex", opts: []Option{WithPrefixes("(")}, wantErr: `capability prefix "("`},
 		{name: "nil resolver", opts: []Option{WithPrefixes(prefix), WithResolver(nil)}, wantErr: "resolver"},
-		{name: "bad max callers", opts: []Option{WithPrefixes(prefix), WithMaxCallers(0)}, wantErr: "max callers"},
-		{name: "bad sweep interval", opts: []Option{WithPrefixes(prefix), WithSweepInterval(0)}, wantErr: "sweep interval"},
 		{name: "nil option", opts: []Option{nil, WithPrefixes(prefix)}},
 		{
 			name: "everything",
 			opts: []Option{
 				WithPrefixes(prefix, "other:rate:"),
 				WithResolver(func(_ context.Context, _ string, r []Rate) ([]Rate, error) { return r, nil }),
-				WithMaxCallers(10),
-				WithSweepInterval(time.Second),
 			},
 		},
 	}
@@ -289,7 +310,7 @@ func TestForgottenRateKeepsItsSpentAllowance(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 		d := l.Check(ctx, "abc", rateCaps("5/1s"))
 		assert.Equal(t, rates(t, "5/1s"), d.Limits, "2/1s is forgotten")
-		assert.Len(t, l.shard("abc").get("abc").allowances, 2, "but its allowance is not full, so it is kept")
+		assert.Len(t, callerOf(l, "abc").allowances, 2, "but its allowance is not full, so it is kept")
 
 		// Presenting it again finds that allowance rather than a fresh burst.
 		d = l.Check(ctx, "abc", rateCaps("2/1s"))
@@ -411,7 +432,7 @@ func TestWindowBounds(t *testing.T) {
 			l.Check(ctx, "abc", rateCaps("5/1ms"))
 			l.Check(ctx, "abc", rateCaps("500/100ms"))
 			assert.Equal(t, rates(t, "1/1s", "5/1s", "5000/1s"), l.Check(ctx, "abc", rateCaps("1/1s")).Limits)
-			assert.Len(t, l.shard("abc").get("abc").allowances, 3)
+			assert.Len(t, callerOf(l, "abc").allowances, 3)
 		})
 	})
 
@@ -746,82 +767,157 @@ func TestPrefixes(t *testing.T) {
 	}
 }
 
-func TestMaxCallersEvictsLeastRecentlyUsed(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		l := newLimiter(t, WithMaxCallers(2))
-		caps := rateCaps("1/1s")
-
-		assert.True(t, l.Check(ctx, "a", caps).Allowed)
-		assert.True(t, l.Check(ctx, "b", caps).Allowed)
-		assert.False(t, l.Check(ctx, "a", caps).Allowed, "touches a, so b is least recently used")
-
-		assert.True(t, l.Check(ctx, "c", caps).Allowed)
-		assert.Equal(t, 2, l.len())
-
-		assert.False(t, l.Check(ctx, "a", caps).Allowed, "a was kept")
-		assert.True(t, l.Check(ctx, "b", caps).Allowed, "b was evicted, so its allowance is full again")
-	})
-}
-
-func TestMaxCallersSharded(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		l := newLimiter(t, WithMaxCallers(10_000))
-		require.Greater(t, len(l.shards), 1)
-
-		total := 0
-		for _, s := range l.shards {
-			total += s.max
-		}
-
-		assert.Equal(t, 10_000, total)
-
-		for i := range 20_000 {
-			l.Check(ctx, strconv.Itoa(i), rateCaps("1/1h"))
-		}
-
-		assert.LessOrEqual(t, l.len(), 10_000)
-	})
-}
-
 func TestExpiredStateDropped(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		l := newLimiter(t, WithMaxCallers(10)) // one shard, so access sweeps it
+		l := newLimiter(t)
 
 		l.Check(ctx, "abc", rateCaps("5/1s"))
 		l.Check(ctx, "def", rateCaps("5/1m"))
 		assert.Equal(t, 2, l.len())
 
 		time.Sleep(2*time.Second + time.Nanosecond)
-		l.sweep()
-		assert.Equal(t, 1, l.len(), "abc forgot its rate and its allowance is full")
+		l.Check(ctx, "ghi", rateCaps("5/1m"))
+		synctest.Wait()
+		assert.Equal(t, 2, l.len(), "abc expired, so the next check had it swept")
 
-		time.Sleep(2 * time.Minute)
-		l.Check(ctx, "ghi", rateCaps("5/1s"))
-		assert.Equal(t, 1, l.len(), "def is dropped lazily on access")
+		// Sweeps are at least minSweepGap apart.
+		swept := sweptAt(l)
+		l.Check(ctx, "jkl", rateCaps("5/1s"))
+		time.Sleep(3 * time.Second)
+		l.Check(ctx, "def", rateCaps("5/1m"))
+		synctest.Wait()
+		assert.Equal(t, swept, sweptAt(l), "jkl expired, but the Limiter was swept too recently")
+		assert.Equal(t, 3, l.len())
+
+		time.Sleep(minSweepGap)
+		l.Check(ctx, "def", rateCaps("5/1m"))
+		synctest.Wait()
+		assert.Equal(t, 2, l.len(), "jkl is swept once the gap has passed")
 	})
 }
 
-func TestStartStop(t *testing.T) {
+func TestSweepOnlyWhenDue(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		l := newLimiter(t, WithSweepInterval(time.Minute))
+		l := newLimiter(t)
+		assert.True(t, dueAt(l).IsZero(), "nothing tracked, nothing due")
 
-		l.Stop() // stopping a stopped limiter does nothing
-		l.Start()
-		l.Start()
-		defer l.Stop()
+		l.Check(ctx, "abc", rateCaps("5/1h"))
+		due := dueAt(l)
+		assert.Equal(t, time.Now().Add(2*time.Hour), due, "abc is forgotten after twice its window")
 
-		l.Check(ctx, "abc", rateCaps("5/1s"))
-		time.Sleep(3 * time.Second)
+		for range 10 {
+			time.Sleep(10 * time.Minute)
+			l.Check(ctx, "abc", rateCaps("5/1h"))
+		}
+
 		synctest.Wait()
-		assert.Equal(t, 1, l.len(), "expired, but not yet swept")
+		assert.True(t, sweptAt(l).IsZero(), "using a Caller never sweeps")
+		assert.Equal(t, due, dueAt(l), "nor moves the next sweep")
 
-		time.Sleep(time.Minute)
+		l.Check(ctx, "def", rateCaps("5/1m"))
+		assert.Equal(t, time.Now().Add(2*time.Minute), dueAt(l), "a new Caller brings it forward")
+
+		// Once def is due, the next check has the Limiter swept: def has
+		// expired, and abc, just presented again, is due in twice its window.
+		time.Sleep(2*time.Minute + time.Nanosecond)
+		l.Check(ctx, "abc", rateCaps("5/1h"))
 		synctest.Wait()
-		assert.Zero(t, l.len(), "swept")
-
-		l.Stop()
-		l.Stop()
+		assert.Equal(t, 1, l.len())
+		assert.Equal(t, time.Now(), sweptAt(l))
+		assert.Equal(t, time.Now().Add(2*time.Hour), dueAt(l))
 	})
+}
+
+func TestSweepMany(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		n := 10_000
+		l := newLimiter(t)
+		for i := range n {
+			window := "1s" // expires
+			if i%3 == 0 {
+				window = "1h" // stays
+			}
+
+			l.Check(ctx, strconv.Itoa(i), rateCaps("5/"+window))
+		}
+
+		time.Sleep(2*time.Second + time.Nanosecond)
+		l.Check(ctx, "0", rateCaps("5/1h"))
+		synctest.Wait()
+		assert.Equal(t, (n+2)/3, l.len(), "only the 1h Callers are left")
+	})
+}
+
+func TestOneTidyAtATime(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		l := newLimiter(t)
+		l.Check(ctx, "abc", rateCaps("5/1s"))
+		time.Sleep(2*time.Second + time.Nanosecond)
+
+		l.tidying.Store(true) // as if a tidy were running
+		l.Check(ctx, "def", rateCaps("5/1m"))
+		synctest.Wait()
+		assert.Equal(t, 2, l.len(), "no second tidy is started")
+
+		l.tidying.Store(false)
+		l.Check(ctx, "def", rateCaps("5/1m"))
+		synctest.Wait()
+		assert.Equal(t, 1, l.len(), "the next check starts one")
+		assert.False(t, l.tidying.Load(), "and it exits when done")
+	})
+}
+
+func TestConcurrentChecksWhileSweeping(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		l := newLimiter(t)
+		var wg sync.WaitGroup
+		for g := range 8 {
+			wg.Go(func() {
+				for i := range 500 {
+					l.Check(ctx, strconv.Itoa(g*1000+i%300), rateCaps("5/1s"))
+					if i%50 == 0 {
+						time.Sleep(time.Minute) // let state expire and sweeps come due
+					}
+				}
+			})
+		}
+
+		wg.Wait()
+		synctest.Wait()
+		assert.LessOrEqual(t, l.len(), 8*300)
+	})
+}
+
+func TestForgottenWhileLookedUp(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		l := newLimiter(t)
+		caps := rateCaps("1/1h")
+		assert.True(t, l.Check(ctx, "abc", caps).Allowed)
+
+		// As if the sweep forgot abc between a check's lookup and its lock:
+		// the check holds the old state, which is no longer in callers.
+		old := callerOf(l, "abc")
+		old.mu.Lock()
+		l.forget(old)
+		old.mu.Unlock()
+
+		assert.True(t, l.Check(ctx, "abc", caps).Allowed, "the check gets fresh state, not the forgotten one")
+		assert.NotSame(t, old, callerOf(l, "abc"))
+	})
+}
+
+func TestCallerExpiry(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	c := &caller{allowances: map[Rate]*allowance{
+		{Count: 5, Window: time.Minute}: {seen: now, tat: now.Add(time.Hour)},
+		{Count: 5, Window: time.Hour}:   {seen: now},
+	}}
+	assert.Equal(t, now.Add(2*time.Hour), c.expiry(), "the latest of each rate being forgotten and its allowance refilling")
+
+	c.allowances[Rate{Count: 1, Window: time.Minute}] = &allowance{seen: now, tat: now.Add(3 * time.Hour)}
+	assert.Equal(t, now.Add(3*time.Hour), c.expiry())
+
+	assert.True(t, (&caller{}).expiry().IsZero(), "no allowances")
 }
 
 func TestConcurrentNeverExceedsBurst(t *testing.T) {

@@ -117,13 +117,25 @@ so a refusal by one leaves the others untouched.
 - An allowance is dropped once its rate is no longer remembered and its
   TAT is in the past: full and unpresented, it carries no information. A
   Caller with no allowances left is deleted.
-- Bound the number of Callers (`WithMaxCallers`, default e.g. 100 000).
-  When full, evict the least recently used Caller. Eviction only ever makes
-  a Caller's next request more lenient.
-- Sweep expired state lazily on access, plus a periodic sweep tied to the
-  limiter's lifetime (`Start`/`Stop`, or a context).
-- Safe for concurrent use. Shard by principal hash so a single lock isn't a
-  hot spot.
+- No cap on the number of Callers (ADR 0004). Forgetting a Caller early
+  would refill their allowance, so state is kept until it expires: twice
+  the longest window after the Caller's last request, at most 48 hours
+  under `DefaultResolver`. Only Callers whose Token carries a rate have
+  state.
+- Sweep expired state on access, with no goroutine to start or stop. The
+  Limiter knows the earliest a Caller may expire; a check before then does
+  nothing more than compare times. The first check after it starts a
+  goroutine, unless one is already running, which sweeps every Caller,
+  works out when the Limiter is next due, and exits. Sweeps are at least a
+  minute apart. The goroutine locks one Caller at a time, so no check waits
+  for a sweep. Using a Caller only makes their state last longer, so
+  only a new Caller can bring the next sweep forward. A Limiter that sees
+  no traffic is not swept, but holds only what it held when traffic
+  stopped.
+- Safe for concurrent use. Callers are kept in a `sync.Map`, so looking
+  one up takes no lock, and each Caller has its own lock. A check waits
+  only for other checks of the same Caller. A Caller forgotten between a
+  check's lookup and its lock is marked so, and the check looks again.
 
 ## Suggested API
 
@@ -134,7 +146,6 @@ func New(opts ...Option) (*Limiter, error)
 
 func WithPrefixes(prefixes ...string) Option         // required; none = error from New
 func WithResolver(r Resolver) Option                  // the final say over a Token's rates
-func WithMaxCallers(n int) Option
 
 // Resolver decides what rates a Token counts as carrying.  Ceilings,
 // Overrides, requiring a rate and blocking a Caller are written here.
@@ -278,7 +289,6 @@ Behavior:
   `Err`, nothing remembered). An error, such as requiring a rate, or a
   rate neither valid nor zero → `Denied` with `Err`, nothing spent.
 - A different principal → an independent allowance.
-- MaxCallers reached → the least recently used Caller is evicted.
 - Concurrent calls (`-race`) → never more than Burst allowed from a full
   allowance.
 

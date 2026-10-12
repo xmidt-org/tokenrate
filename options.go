@@ -12,16 +12,6 @@ import (
 	"time"
 )
 
-const (
-	// DefaultMaxCallers is the number of Callers a Limiter tracks unless
-	// WithMaxCallers says otherwise.
-	DefaultMaxCallers = 100_000
-
-	// DefaultSweepInterval is how often a started Limiter sweeps expired
-	// state unless WithSweepInterval says otherwise.
-	DefaultSweepInterval = time.Minute
-)
-
 // Option configures a Limiter.
 type Option interface {
 	apply(*Limiter) error
@@ -127,33 +117,6 @@ func WithResolver(r Resolver) Option {
 		}
 
 		l.resolve = r
-		return nil
-	})
-}
-
-// WithMaxCallers bounds how many Callers the Limiter tracks.  When it is
-// full, the least recently used Caller is forgotten, which only ever makes
-// that Caller's next request more lenient.  The default is DefaultMaxCallers.
-func WithMaxCallers(n int) Option {
-	return optionFunc(func(l *Limiter) error {
-		if n < 1 {
-			return errors.New("max callers must be positive")
-		}
-
-		l.maxCallers = n
-		return nil
-	})
-}
-
-// WithSweepInterval sets how often a started Limiter sweeps expired state.
-// The default is DefaultSweepInterval.
-func WithSweepInterval(d time.Duration) Option {
-	return optionFunc(func(l *Limiter) error {
-		if d <= 0 {
-			return errors.New("sweep interval must be positive")
-		}
-
-		l.sweepInterval = d
 		return nil
 	})
 }

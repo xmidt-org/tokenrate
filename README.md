@@ -49,9 +49,6 @@ if err != nil {
 	return err
 }
 
-limiter.Start() // optional: periodically sweep idle state
-defer limiter.Stop()
-
 handler := tokenrate.Middleware{
 	Limiter: limiter,
 	Extract: func(r *http.Request) (string, []string) {
