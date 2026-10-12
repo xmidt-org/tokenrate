@@ -41,9 +41,9 @@ bascule's middleware.
 
 `{prefix}<count>/<window>`, e.g. `prefix:rate:50/1m`.
 
-- The prefix is a string or regular expression, which may contain
-  subexpressions. The remainder is the rate. (These are the same semantics
-  as bascule's `basculecaps.WithPrefixes`, but tokenrate doesn't import it.)
+- The prefix is a plain string, matched exactly at the start of the
+  capability; it is not a pattern. The remainder is the rate. When several
+  prefixes match, the first configured is used. An empty prefix is an error.
 - `<count>`: a positive base-10 integer.
 - `<window>`: a positive Go duration (`time.ParseDuration`), e.g. `1m`,
   `1h30m` or `24h`. Days (`1d`) are not a unit.
@@ -247,15 +247,15 @@ itself.
 
 ## Acceptance tests
 
-Table-driven, testify, with an injected clock. The behavior tests lower the
-minimum window to `1s` so they run on short windows.
+Table-driven, testify, with `testing/synctest` for time. The behavior tests
+use a Resolver whose minimum window is `1s`, so they run on short windows.
 
 Parsing:
 
 - `50/1s`, `600/1m`, `100/24h`, `4/1h30m` → valid.
 - `0/1s`, `10/0s`, `-1/1s`, `1.5/1s`, `abc/1s`, `10/1x`, `10`, `10/1d`
   → malformed.
-- Prefix with subexpressions → the rate is still extracted correctly.
+- A prefix is matched literally: `a.b:` doesn't match `aXb:5/1s`.
 
 Behavior:
 

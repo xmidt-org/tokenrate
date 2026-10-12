@@ -125,7 +125,7 @@ func TestNew(t *testing.T) {
 		{name: "prefix", opts: []Option{WithPrefixes(prefix)}},
 		{name: "no prefix", wantErr: ErrNoPrefixes.Error()},
 		{name: "empty prefixes", opts: []Option{WithPrefixes()}, wantErr: ErrNoPrefixes.Error()},
-		{name: "bad regex", opts: []Option{WithPrefixes("(")}, wantErr: `capability prefix "("`},
+		{name: "empty prefix", opts: []Option{WithPrefixes(prefix, "")}, wantErr: ErrEmptyPrefix.Error()},
 		{name: "nil resolver", opts: []Option{WithPrefixes(prefix), WithResolver(nil)}, wantErr: "resolver"},
 		{name: "nil option", opts: []Option{nil, WithPrefixes(prefix)}},
 		{
@@ -734,16 +734,10 @@ func TestPrefixes(t *testing.T) {
 	}{
 		{name: "plain", prefixes: []string{"prefix:rate:"}, caps: []string{"prefix:rate:5/1s"}, want: []string{"5/1s"}},
 		{
-			name:     "subexpressions",
-			prefixes: []string{`(prefix|other):(rate|limit):`},
-			caps:     []string{"other:limit:7/1m"},
-			want:     []string{"7/1m"},
-		},
-		{
-			name:     "alternation stays anchored",
-			prefixes: []string{`a:|b:`},
-			caps:     []string{"zzb:9/1s", "b:4/1s"},
-			want:     []string{"4/1s"},
+			name:     "not a pattern",
+			prefixes: []string{"a.b:", "(c|d):"},
+			caps:     []string{"aXb:9/1s", "c:9/1s", "a.b:4/1s", "(c|d):7/1m"},
+			want:     []string{"4/1s", "7/1m"},
 		},
 		{
 			name:     "several prefixes",

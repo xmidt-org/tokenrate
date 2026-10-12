@@ -16,8 +16,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"regexp"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,6 +37,9 @@ var (
 	// configured.
 	ErrNoPrefixes = errors.New("at least one capability prefix is required")
 
+	// ErrEmptyPrefix is returned by New when a Capability Prefix is empty.
+	ErrEmptyPrefix = errors.New("a capability prefix cannot be empty")
+
 	// ErrInvalidRate is the Decision.Err when a Resolver returns a rate that
 	// is neither valid nor the zero Rate, which denies the request.
 	ErrInvalidRate = errors.New("resolver returned an invalid rate")
@@ -53,7 +56,7 @@ var (
 // It needs no starting or stopping.  A check that finds expired state starts
 // a goroutine to sweep it, unless one is running, which exits when done.
 type Limiter struct {
-	prefixes []*regexp.Regexp
+	prefixes []string
 	resolve  Resolver
 
 	// callers holds each tracked Caller's state, by principal.  Looking up
@@ -184,18 +187,18 @@ func (l *Limiter) resolveRates(ctx context.Context, principal string, provided [
 	return rates, nil
 }
 
-// selectRates finds the capabilities that match a prefix and returns their
-// rates, in Token order.  Each malformed one
-// adds a warning and contributes a zero Rate.  Each carries its text.
+// selectRates finds the capabilities that start with a prefix and returns
+// their rates, in Token order.  Each malformed one adds a warning and
+// contributes a zero Rate.  Each carries its text.
 func (l *Limiter) selectRates(capabilities []string, warnings *[]Warning) (rates []Rate) {
 	for _, c := range capabilities {
-		for _, re := range l.prefixes {
-			m := re.FindStringSubmatch(c)
-			if m == nil {
+		for _, p := range l.prefixes {
+			text, ok := strings.CutPrefix(c, p)
+			if !ok {
 				continue
 			}
 
-			r, err := ParseRate(m[len(m)-1])
+			r, err := ParseRate(text)
 			if err != nil {
 				*warnings = append(*warnings, malformedWarning(c))
 			}

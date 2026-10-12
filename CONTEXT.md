@@ -23,7 +23,7 @@ _Avoid_: client ID, user, partner
 One flat string carried by a **Token**. A Token's capabilities may serve many services; tokenrate only looks at the ones its **Capability Prefix** selects.
 
 **Capability Prefix**:
-A configured string or regular expression that selects which **Capabilities** are **Rate Capabilities**. Nothing is built in; capabilities matching no prefix are ignored silently.
+A configured plain string that selects which **Capabilities** are **Rate Capabilities**. Nothing is built in; capabilities starting with no prefix are ignored silently.
 
 **Rate Capability**:
 A **Capability** (e.g. `{prefix}50/1m`) stating how many calls a **Caller** may make per window against **one instance** of the service. Fleet-wide throughput is roughly that × the number of instances; issuers do that math.

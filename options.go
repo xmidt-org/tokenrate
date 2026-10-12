@@ -6,8 +6,6 @@ package tokenrate
 import (
 	"context"
 	"errors"
-	"fmt"
-	"regexp"
 	"slices"
 	"time"
 )
@@ -24,22 +22,18 @@ func (f optionFunc) apply(l *Limiter) error { return f(l) }
 // WithPrefixes adds Capability Prefixes, which select the Rate Capabilities
 // among a Token's capabilities.  At least one is required.
 //
-// A prefix may be a regular expression, and may contain subexpressions.  It
-// is anchored at the start of the capability, and whatever follows it is the
-// rate.  A capability that matches no prefix is ignored.
+// A prefix is a plain string, matched exactly at the start of the
+// capability, and whatever follows it is the rate.  A capability that starts
+// with no prefix is ignored; one that starts with several is read using the
+// first configured.  A prefix cannot be empty, since every capability would
+// then count as a rate.
 func WithPrefixes(prefixes ...string) Option {
 	return optionFunc(func(l *Limiter) error {
-		for _, p := range prefixes {
-			// Group the prefix so a top-level alternation can't escape the
-			// anchor.  The rate is always the last subexpression.
-			re, err := regexp.Compile("^(?:" + p + ")(.*)$")
-			if err != nil {
-				return fmt.Errorf("capability prefix %q: %w", p, err)
-			}
-
-			l.prefixes = append(l.prefixes, re)
+		if slices.Contains(prefixes, "") {
+			return ErrEmptyPrefix
 		}
 
+		l.prefixes = append(l.prefixes, prefixes...)
 		return nil
 	})
 }
