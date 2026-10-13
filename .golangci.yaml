@@ -12,8 +12,19 @@ linters:
       # Disable G104: Errors unhandled (similar to errcheck which is disabled)
       excludes:
         - G104
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: '^time\.Unix(Milli|Micro)?$'
+          msg: wall clock; the Limiter measures time on the monotonic clock
+        - pattern: '^time\.Time\.Unix(Nano|Milli|Micro)?$'
+          msg: wall clock; the Limiter measures time on the monotonic clock
   enable:
     - dupl
+    - forbidigo
+    - intrange
+    - testifylint
+    - unparam
     - errorlint
     - goconst
     - gosec
@@ -33,6 +44,10 @@ linters:
       - path: _test\.go
         linters:
           - goconst
+      # Tests build fixed instants for arithmetic; they read no clock.
+      - path: _test\.go
+        linters:
+          - forbidigo
 
 formatters:
   enable:
