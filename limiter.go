@@ -418,10 +418,12 @@ func (c *caller) expiry() time.Time {
 	var t time.Time
 	for r, a := range c.allowances {
 		// Written so that twice a very long window can't overflow.
-		for _, at := range []time.Time{a.seen.Add(r.Window).Add(r.Window), a.tat} {
-			if at.After(t) {
-				t = at
-			}
+		if forgotten := a.seen.Add(r.Window).Add(r.Window); forgotten.After(t) {
+			t = forgotten
+		}
+
+		if a.tat.After(t) {
+			t = a.tat
 		}
 	}
 
