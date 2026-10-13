@@ -331,76 +331,93 @@ func TestForgottenRateKeepsItsSpentAllowance(t *testing.T) {
 
 func TestMalformed(t *testing.T) {
 	t.Parallel()
-	malformed := `malformed; kind=rate; cap="prefix:rate:10/0s"`
 
-	t.Run("only malformed", func(t *testing.T) {
-		t.Parallel()
-		synctest.Test(t, func(t *testing.T) {
-			l := newLimiter(t)
-			for range 3 {
-				d := l.Check(ctx, "abc", rateCaps("10/0s"))
-				assert.False(t, d.Allowed)
-				assert.Equal(t, RateExceeded, d.Reason)
-				assert.Equal(t, []Rate{{text: "10/0s"}}, d.Limits)
-				assert.True(t, d.Limit.IsZero())
-				assert.Zero(t, d.RetryAfter)
-				require.Len(t, d.Warnings, 1)
-				assert.Equal(t, malformed, d.Warnings[0].String())
-			}
+	dropZero := func(ctx context.Context, p string, provided []Rate) ([]Rate, error) {
+		return testResolver(ctx, p, slices.DeleteFunc(provided, Rate.IsZero))
+	}
 
-			assert.Zero(t, l.len(), "no state is kept for a zero limit")
+	tests := []struct {
+		name     string
+		opts     []Option // beyond newLimiter's
+		before   []string // rates checked first, as another Token
+		rates    []string // the Token's rates
+		allowed  bool
+		limits   []Rate
+		warnings []string // the malformed rates, one warning each, in order
+		callers  int      // state kept afterwards
+	}{
+		{
+			name:     "only malformed",
+			rates:    []string{"10/0s"},
+			limits:   []Rate{{text: "10/0s"}},
+			warnings: []string{"10/0s"},
+			callers:  0, // a zero limit is not worth remembering
+		},
+		{
+			name:     "alongside a valid rate",
+			rates:    []string{"10/0s", "5/1s"},
+			allowed:  true,
+			limits:   rates(t, "5/1s"),
+			warnings: []string{"10/0s"},
+			callers:  1,
+		},
+		{
+			name:     "after a remembered rate",
+			before:   []string{"5/1s"},
+			rates:    []string{"10/0s"},
+			limits:   []Rate{{text: "10/0s"}}, // held to zero whatever the other Token said
+			warnings: []string{"10/0s"},
+			callers:  1, // and what is remembered is undisturbed
+		},
+		{
+			name:     "several malformed",
+			rates:    []string{"10/0s", "abc/1s", "10/0s"},
+			limits:   []Rate{{text: "10/0s"}, {text: "abc/1s"}}, // each text once
+			warnings: []string{"10/0s", "abc/1s", "10/0s"},      // every capability
+		},
+		{
+			name:     "with a resolver that drops the zero",
+			opts:     []Option{WithResolver(dropZero)},
+			rates:    []string{"10/0s"},
+			allowed:  true, // the resolver decided the Token is Unrestricted
+			warnings: []string{"10/0s"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				l := newLimiter(t, tc.opts...)
+				if tc.before != nil {
+					require.True(t, l.Check(ctx, "abc", rateCaps(tc.before...)).Allowed)
+				}
+
+				d := l.Check(ctx, "abc", rateCaps(tc.rates...))
+				assert.Equal(t, tc.allowed, d.Allowed)
+				assert.Equal(t, tc.limits, d.Limits)
+				if tc.allowed {
+					assert.Equal(t, None, d.Reason)
+				} else {
+					assert.Equal(t, RateExceeded, d.Reason, "a zero Rate refuses without denying")
+					assert.True(t, d.Limit.IsZero())
+					assert.Zero(t, d.RetryAfter, "waiting never helps")
+				}
+
+				var want, got []string
+				for _, r := range tc.warnings {
+					want = append(want, malformedWarning(prefix+r).String())
+				}
+
+				for _, w := range d.Warnings {
+					got = append(got, w.String())
+				}
+
+				assert.Equal(t, want, got)
+				assert.Equal(t, tc.callers, l.len())
+			})
 		})
-	})
-
-	t.Run("alongside a valid rate", func(t *testing.T) {
-		t.Parallel()
-		synctest.Test(t, func(t *testing.T) {
-			l := newLimiter(t)
-			d := l.Check(ctx, "abc", rateCaps("10/0s", "5/1s"))
-			assert.True(t, d.Allowed)
-			assert.Equal(t, rates(t, "5/1s"), d.Limits)
-			require.Len(t, d.Warnings, 1)
-			assert.Equal(t, malformed, d.Warnings[0].String())
-		})
-	})
-
-	t.Run("after a remembered rate", func(t *testing.T) {
-		t.Parallel()
-		synctest.Test(t, func(t *testing.T) {
-			l := newLimiter(t)
-			l.Check(ctx, "abc", rateCaps("5/1s"))
-			d := l.Check(ctx, "abc", rateCaps("10/0s"))
-			assert.False(t, d.Allowed, "a broken Token is held to zero, whatever the Caller's other Tokens say")
-			assert.Equal(t, RateExceeded, d.Reason)
-			assert.Equal(t, []Rate{{text: "10/0s"}}, d.Limits)
-			assert.Len(t, d.Warnings, 1)
-			assert.Equal(t, 1, l.len(), "and does not disturb what is remembered")
-		})
-	})
-
-	t.Run("several malformed", func(t *testing.T) {
-		t.Parallel()
-		synctest.Test(t, func(t *testing.T) {
-			l := newLimiter(t)
-			d := l.Check(ctx, "abc", rateCaps("10/0s", "abc/1s", "10/0s"))
-			assert.False(t, d.Allowed)
-			assert.Equal(t, []Rate{{text: "10/0s"}, {text: "abc/1s"}}, d.Limits, "each text once, in order")
-			assert.Len(t, d.Warnings, 3, "but every capability is warned about")
-		})
-	})
-
-	t.Run("with a resolver that drops the zero", func(t *testing.T) {
-		t.Parallel()
-		synctest.Test(t, func(t *testing.T) {
-			l := newLimiter(t, WithResolver(func(ctx context.Context, p string, provided []Rate) ([]Rate, error) {
-				return testResolver(ctx, p, slices.DeleteFunc(provided, Rate.IsZero))
-			}))
-			d := l.Check(ctx, "abc", rateCaps("10/0s"))
-			assert.True(t, d.Allowed, "the resolver decided the Token is Unrestricted")
-			assert.Empty(t, d.Limits)
-			assert.Len(t, d.Warnings, 1, "it is still warned about")
-		})
-	})
+	}
 }
 
 func TestWindowBounds(t *testing.T) {
