@@ -71,8 +71,8 @@ type Limiter struct {
 	// swept is when the Limiter was last swept, in Unix nanoseconds.
 	swept atomic.Int64
 
-	// tidying is whether a tidy goroutine is running.
-	tidying atomic.Bool
+	// sweeping is whether a sweep goroutine is running.
+	sweeping atomic.Bool
 }
 
 // noneDue is Limiter.due when no Caller is tracked: no time reaches it.
@@ -138,7 +138,7 @@ func (l *Limiter) Check(ctx context.Context, principal string, capabilities []st
 
 	now := time.Now()
 	if l.isDue(now) {
-		l.startTidy()
+		l.startSweep()
 	}
 
 	for {
@@ -301,19 +301,19 @@ func (l *Limiter) expect(t time.Time) {
 	}
 }
 
-// startTidy starts a goroutine to sweep the Limiter, unless one is already
+// startSweep starts a goroutine to sweep the Limiter, unless one is already
 // running, so no check waits for a sweep.
-func (l *Limiter) startTidy() {
-	if l.tidying.CompareAndSwap(false, true) {
-		go l.tidy()
+func (l *Limiter) startSweep() {
+	if l.sweeping.CompareAndSwap(false, true) {
+		go l.sweep()
 	}
 }
 
-// tidy sweeps the Limiter, then exits.  It drops every Caller whose state
-// no longer carries information, and notes when the rest expire.  It locks
-// one Caller at a time, so checks carry on while it works.
-func (l *Limiter) tidy() {
-	defer l.tidying.Store(false)
+// sweep drops every Caller whose state no longer carries information, notes
+// when the rest expire, and exits.  It locks one Caller at a time, so checks
+// carry on while it works.
+func (l *Limiter) sweep() {
+	defer l.sweeping.Store(false)
 
 	now := time.Now()
 

@@ -906,23 +906,23 @@ func TestSweepMany(t *testing.T) {
 	})
 }
 
-func TestOneTidyAtATime(t *testing.T) {
+func TestOneSweepAtATime(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		l := newLimiter(t)
 		l.Check(ctx, "abc", rateCaps("5/1s"))
 		time.Sleep(2*time.Second + time.Nanosecond)
 
-		l.tidying.Store(true) // as if a tidy were running
+		l.sweeping.Store(true) // as if a sweep were running
 		l.Check(ctx, "def", rateCaps("5/1m"))
 		synctest.Wait()
-		assert.Equal(t, 2, l.len(), "no second tidy is started")
+		assert.Equal(t, 2, l.len(), "no second sweep is started")
 
-		l.tidying.Store(false)
+		l.sweeping.Store(false)
 		l.Check(ctx, "def", rateCaps("5/1m"))
 		synctest.Wait()
 		assert.Equal(t, 1, l.len(), "the next check starts one")
-		assert.False(t, l.tidying.Load(), "and it exits when done")
+		assert.False(t, l.sweeping.Load(), "and it exits when done")
 	})
 }
 
