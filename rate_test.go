@@ -71,7 +71,7 @@ func TestParseRateMalformed(t *testing.T) {
 		t.Run(in, func(t *testing.T) {
 			t.Parallel()
 			r, err := ParseRate(in)
-			assert.ErrorIs(t, err, ErrMalformedRate)
+			require.ErrorIs(t, err, ErrMalformedRate)
 			assert.Equal(t, Rate{text: in}, r, "the text is kept")
 			assert.True(t, r.IsZero())
 			assert.Equal(t, in, r.String(), "as the client wrote it")

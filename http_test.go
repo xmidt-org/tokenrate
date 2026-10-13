@@ -129,7 +129,7 @@ func TestMiddlewareDenied(t *testing.T) {
 		h.ServeHTTP(rec, newRequest("abc"))
 		assert.Equal(t, http.StatusForbidden, rec.Code)
 		assert.Empty(t, rec.Header(), "the error is not shown to the Caller")
-		assert.ErrorIs(t, observed.Err, denied, "Observe gets the error to log")
+		require.ErrorIs(t, observed.Err, denied, "Observe gets the error to log")
 
 		rec = httptest.NewRecorder()
 		h.ServeHTTP(rec, newRequest("abc", "5/1s"))

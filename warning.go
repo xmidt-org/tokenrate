@@ -45,7 +45,7 @@ func writeValue(b *strings.Builder, v string) {
 	}
 
 	b.WriteByte('"')
-	for i := 0; i < len(v); i++ {
+	for i := range len(v) {
 		if v[i] == '"' || v[i] == '\\' {
 			b.WriteByte('\\')
 		}
@@ -62,7 +62,7 @@ func isToken(s string) bool {
 		return false
 	}
 
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if !isTokenChar(s[i]) {
 			return false
 		}

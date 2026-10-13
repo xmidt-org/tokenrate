@@ -79,9 +79,10 @@ func rates(t *testing.T, ss ...string) []Rate {
 	return out
 }
 
-// callerOf returns the state kept for principal, without marking it used.
-func callerOf(l *Limiter, principal string) *caller {
-	v, _ := l.callers.Load(principal)
+// abcCaller returns the state kept for abc, the Caller most tests use,
+// without marking it used.
+func abcCaller(l *Limiter) *caller {
+	v, _ := l.callers.Load("abc")
 	return v.(*caller)
 }
 
@@ -143,12 +144,12 @@ func TestNew(t *testing.T) {
 			t.Parallel()
 			l, err := New(tc.opts...)
 			if tc.wantErr != "" {
-				assert.ErrorContains(t, err, tc.wantErr)
+				require.ErrorContains(t, err, tc.wantErr)
 				assert.Nil(t, l)
 				return
 			}
 
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			assert.NotNil(t, l)
 		})
 	}
@@ -320,7 +321,7 @@ func TestForgottenRateKeepsItsSpentAllowance(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 		d := l.Check(ctx, "abc", rateCaps("5/1s"))
 		assert.Equal(t, rates(t, "5/1s"), d.Limits, "2/1s is forgotten")
-		assert.Len(t, callerOf(l, "abc").allowances, 2, "but its allowance is not full, so it is kept")
+		assert.Len(t, abcCaller(l).allowances, 2, "but its allowance is not full, so it is kept")
 
 		// Presenting it again finds that allowance rather than a fresh burst.
 		d = l.Check(ctx, "abc", rateCaps("2/1s"))
@@ -471,7 +472,7 @@ func TestWindowBounds(t *testing.T) {
 			l.Check(ctx, "abc", rateCaps("5/1ms"))
 			l.Check(ctx, "abc", rateCaps("500/100ms"))
 			assert.Equal(t, rates(t, "1/1s", "5/1s", "5000/1s"), l.Check(ctx, "abc", rateCaps("1/1s")).Limits)
-			assert.Len(t, callerOf(l, "abc").allowances, 3)
+			assert.Len(t, abcCaller(l).allowances, 3)
 		})
 	})
 
@@ -738,7 +739,7 @@ func TestResolver(t *testing.T) {
 			d := l.Check(ctx, "abc", rateCaps("10/1s"))
 			assert.False(t, d.Allowed)
 			assert.Equal(t, RateExceeded, d.Reason)
-			assert.NoError(t, d.Err)
+			require.NoError(t, d.Err)
 			assert.Equal(t, []Rate{{}, {Count: 10, Window: time.Second, text: "10/1s"}}, d.Limits, "zero sorts first; the Token's rate as written")
 			assert.True(t, d.Limit.IsZero())
 			assert.Zero(t, d.RetryAfter, "a zero limit never recovers")
@@ -754,7 +755,7 @@ func TestResolver(t *testing.T) {
 			d := l.Check(ctx, "abc", rateCaps("10/1s", "10/0s"))
 			assert.False(t, d.Allowed)
 			assert.Equal(t, Denied, d.Reason)
-			assert.ErrorIs(t, d.Err, blocked)
+			require.ErrorIs(t, d.Err, blocked)
 			assert.Empty(t, d.Limits)
 			assert.Len(t, d.Warnings, 1, "the malformed rate is still warned about")
 			assert.Zero(t, l.len(), "nothing is spent or remembered")
@@ -957,7 +958,7 @@ func TestForgottenWhileLookedUp(t *testing.T) {
 
 		// A check looks abc up, and the sweep forgets them before the check
 		// locks them: the check holds state that is no longer in callers.
-		old := callerOf(l, "abc")
+		old := abcCaller(l)
 		old.mu.Lock()
 		l.forget(old)
 		old.mu.Unlock()
@@ -968,7 +969,7 @@ func TestForgottenWhileLookedUp(t *testing.T) {
 
 		// Looking again finds fresh state.
 		assert.True(t, l.Check(ctx, "abc", caps).Allowed)
-		assert.NotSame(t, old, callerOf(l, "abc"))
+		assert.NotSame(t, old, abcCaller(l))
 	})
 }
 
