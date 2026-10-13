@@ -117,6 +117,7 @@ func allowedCount(l *Limiter, principal string, caps []string, n int) int {
 }
 
 func TestNew(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		opts    []Option
@@ -139,6 +140,7 @@ func TestNew(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			l, err := New(tc.opts...)
 			if tc.wantErr != "" {
 				assert.ErrorContains(t, err, tc.wantErr)
@@ -156,6 +158,7 @@ func TestNew(t *testing.T) {
 }
 
 func TestBurstAndRefill(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		l := newLimiter(t)
 		caps := rateCaps("5/1s")
@@ -184,6 +187,7 @@ func TestBurstAndRefill(t *testing.T) {
 }
 
 func TestEveryRateInTokenApplies(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		l := newLimiter(t)
 
@@ -200,6 +204,7 @@ func TestEveryRateInTokenApplies(t *testing.T) {
 }
 
 func TestTieredRates(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		l := newLimiter(t)
 		caps := rateCaps("3/1s", "5/1m")
@@ -223,6 +228,7 @@ func TestTieredRates(t *testing.T) {
 }
 
 func TestCallerHeldToEveryTokensRates(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		l := newLimiter(t)
 		tokenA := rateCaps("5/1s")
@@ -250,6 +256,7 @@ func TestCallerHeldToEveryTokensRates(t *testing.T) {
 }
 
 func TestRateCutLandsImmediately(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		l := newLimiter(t)
 		oldToken := rateCaps("20/1s")
@@ -270,6 +277,7 @@ func TestRateCutLandsImmediately(t *testing.T) {
 }
 
 func TestRememberedRateForgotten(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		l := newLimiter(t)
 
@@ -285,6 +293,7 @@ func TestRememberedRateForgotten(t *testing.T) {
 }
 
 func TestRememberedRateRefreshed(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		l := newLimiter(t)
 
@@ -298,6 +307,7 @@ func TestRememberedRateRefreshed(t *testing.T) {
 }
 
 func TestForgottenRateKeepsItsSpentAllowance(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		l := newLimiter(t)
 
@@ -320,9 +330,11 @@ func TestForgottenRateKeepsItsSpentAllowance(t *testing.T) {
 }
 
 func TestMalformed(t *testing.T) {
+	t.Parallel()
 	malformed := `malformed; kind=rate; cap="prefix:rate:10/0s"`
 
 	t.Run("only malformed", func(t *testing.T) {
+		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
 			l := newLimiter(t)
 			for range 3 {
@@ -341,6 +353,7 @@ func TestMalformed(t *testing.T) {
 	})
 
 	t.Run("alongside a valid rate", func(t *testing.T) {
+		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
 			l := newLimiter(t)
 			d := l.Check(ctx, "abc", rateCaps("10/0s", "5/1s"))
@@ -352,6 +365,7 @@ func TestMalformed(t *testing.T) {
 	})
 
 	t.Run("after a remembered rate", func(t *testing.T) {
+		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
 			l := newLimiter(t)
 			l.Check(ctx, "abc", rateCaps("5/1s"))
@@ -365,6 +379,7 @@ func TestMalformed(t *testing.T) {
 	})
 
 	t.Run("several malformed", func(t *testing.T) {
+		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
 			l := newLimiter(t)
 			d := l.Check(ctx, "abc", rateCaps("10/0s", "abc/1s", "10/0s"))
@@ -375,6 +390,7 @@ func TestMalformed(t *testing.T) {
 	})
 
 	t.Run("with a resolver that drops the zero", func(t *testing.T) {
+		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
 			l := newLimiter(t, WithResolver(func(ctx context.Context, p string, provided []Rate) ([]Rate, error) {
 				return testResolver(ctx, p, slices.DeleteFunc(provided, Rate.IsZero))
@@ -388,9 +404,11 @@ func TestMalformed(t *testing.T) {
 }
 
 func TestWindowBounds(t *testing.T) {
+	t.Parallel()
 	bounds := []Option{WithResolver(bounded(time.Second, time.Hour))}
 
 	t.Run("shorter than the minimum", func(t *testing.T) {
+		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
 			l := newLimiter(t, bounds...)
 			d := l.Check(ctx, "abc", rateCaps("100/1ms"))
@@ -401,6 +419,7 @@ func TestWindowBounds(t *testing.T) {
 	})
 
 	t.Run("longer than the maximum", func(t *testing.T) {
+		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
 			l := newLimiter(t, bounds...)
 			d := l.Check(ctx, "abc", rateCaps("100/2h"))
@@ -411,6 +430,7 @@ func TestWindowBounds(t *testing.T) {
 	})
 
 	t.Run("at the bounds", func(t *testing.T) {
+		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
 			l := newLimiter(t, bounds...)
 			assert.Equal(t, rates(t, "5/1s", "5/1h"), l.Check(ctx, "abc", rateCaps("5/1h", "5/1s")).Limits)
@@ -418,6 +438,7 @@ func TestWindowBounds(t *testing.T) {
 	})
 
 	t.Run("rescaled rates apply as rescaled", func(t *testing.T) {
+		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
 			l := newLimiter(t, bounds...)
 			d := l.Check(ctx, "abc", rateCaps("1/1ms", "500/1s", "7200/2h"))
@@ -426,6 +447,7 @@ func TestWindowBounds(t *testing.T) {
 	})
 
 	t.Run("rescaled rates are remembered as one", func(t *testing.T) {
+		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
 			l := newLimiter(t, bounds...)
 			l.Check(ctx, "abc", rateCaps("5/1s"))
@@ -437,6 +459,7 @@ func TestWindowBounds(t *testing.T) {
 	})
 
 	t.Run("burst is bounded by the maximum window", func(t *testing.T) {
+		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
 			l := newLimiter(t, bounds...)
 			assert.Equal(t, 5, allowedCount(l, "abc", rateCaps("10/2h"), 10), "10/2h is held as 5/1h")
@@ -444,6 +467,7 @@ func TestWindowBounds(t *testing.T) {
 	})
 
 	t.Run("rates the resolver adds are not bounded", func(t *testing.T) {
+		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
 			resolve := bounded(time.Second, time.Hour)
 			l := newLimiter(t, WithResolver(func(ctx context.Context, p string, provided []Rate) ([]Rate, error) {
@@ -457,6 +481,7 @@ func TestWindowBounds(t *testing.T) {
 }
 
 func TestDefaultWindowBounds(t *testing.T) {
+	t.Parallel()
 	l, err := New(WithPrefixes(prefix))
 	require.NoError(t, err)
 
@@ -475,6 +500,7 @@ func TestDefaultWindowBounds(t *testing.T) {
 
 	for i, tc := range tests {
 		t.Run(tc.rate, func(t *testing.T) {
+			t.Parallel()
 			d := l.Check(ctx, strconv.Itoa(i), rateCaps(tc.rate))
 			assert.True(t, d.Allowed)
 			assert.Equal(t, rates(t, tc.want), d.Limits)
@@ -484,6 +510,7 @@ func TestDefaultWindowBounds(t *testing.T) {
 }
 
 func TestUnrestricted(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		l := newLimiter(t)
 		for _, caps := range [][]string{nil, {"prefix:api:.*:all", "other:rate:5/1s"}} {
@@ -509,6 +536,7 @@ func ceiling(rates ...Rate) Resolver {
 }
 
 func TestDefaultResolver(t *testing.T) {
+	t.Parallel()
 	five := Rate{Count: 5, Window: time.Minute}
 	ten := Rate{Count: 10, Window: time.Hour}
 
@@ -527,6 +555,7 @@ func TestDefaultResolver(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			before := slices.Clone(tc.provided)
 			got, err := DefaultResolver(ctx, "abc", tc.provided)
 			require.NoError(t, err)
@@ -537,7 +566,9 @@ func TestDefaultResolver(t *testing.T) {
 }
 
 func TestResolver(t *testing.T) {
+	t.Parallel()
 	t.Run("sees the token's rates", func(t *testing.T) {
+		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
 			type ctxKey struct{}
 			var gotPrincipal string
@@ -561,6 +592,7 @@ func TestResolver(t *testing.T) {
 	})
 
 	t.Run("ceiling", func(t *testing.T) {
+		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
 			l := newLimiter(t, WithResolver(ceiling(mustRate(t, "3/1s"), mustRate(t, "100/1m"))))
 
@@ -576,6 +608,7 @@ func TestResolver(t *testing.T) {
 	})
 
 	t.Run("override and required", func(t *testing.T) {
+		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
 			override := rates(t, "5/1m", "2/1s")
 			required := errors.New("a rate is required")
@@ -607,6 +640,7 @@ func TestResolver(t *testing.T) {
 	})
 
 	t.Run("unrestricted stays unrestricted", func(t *testing.T) {
+		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
 			l := newLimiter(t, WithResolver(func(_ context.Context, _ string, provided []Rate) ([]Rate, error) {
 				if len(provided) == 0 {
@@ -626,6 +660,7 @@ func TestResolver(t *testing.T) {
 	})
 
 	t.Run("holding an unrestricted token", func(t *testing.T) {
+		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
 			l := newLimiter(t, WithResolver(ceiling(mustRate(t, "3/1s"))))
 			d := l.Check(ctx, "abc", nil)
@@ -636,6 +671,7 @@ func TestResolver(t *testing.T) {
 	})
 
 	t.Run("nothing resolved for a token with rates", func(t *testing.T) {
+		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
 			l := newLimiter(t, WithResolver(func(context.Context, string, []Rate) ([]Rate, error) { return nil, nil }))
 			d := l.Check(ctx, "abc", rateCaps("10/1s"))
@@ -646,6 +682,7 @@ func TestResolver(t *testing.T) {
 	})
 
 	t.Run("a legacy format made sense of", func(t *testing.T) {
+		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
 			l := newLimiter(t, WithResolver(func(_ context.Context, _ string, provided []Rate) ([]Rate, error) {
 				for i, r := range provided {
@@ -666,6 +703,7 @@ func TestResolver(t *testing.T) {
 	})
 
 	t.Run("spellings share an allowance", func(t *testing.T) {
+		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
 			l := newLimiter(t)
 			assert.Equal(t, rates(t, "4/1h30m"), l.Check(ctx, "abc", rateCaps("4/90m")).Limits)
@@ -675,6 +713,7 @@ func TestResolver(t *testing.T) {
 	})
 
 	t.Run("zero refuses without denying", func(t *testing.T) {
+		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
 			l := newLimiter(t, WithResolver(func(_ context.Context, _ string, provided []Rate) ([]Rate, error) {
 				return append(provided, Rate{}), nil
@@ -691,6 +730,7 @@ func TestResolver(t *testing.T) {
 	})
 
 	t.Run("denied", func(t *testing.T) {
+		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
 			blocked := errors.New("blocked")
 			l := newLimiter(t, WithResolver(func(context.Context, string, []Rate) ([]Rate, error) { return nil, blocked }))
@@ -705,6 +745,7 @@ func TestResolver(t *testing.T) {
 	})
 
 	t.Run("invalid rate", func(t *testing.T) {
+		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
 			l := newLimiter(t, WithResolver(ceiling(Rate{Count: 1})))
 			d := l.Check(ctx, "abc", rateCaps("10/1s"))
@@ -716,6 +757,7 @@ func TestResolver(t *testing.T) {
 }
 
 func TestIndependentCallers(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		l := newLimiter(t)
 		caps := rateCaps("3/1s")
@@ -726,6 +768,7 @@ func TestIndependentCallers(t *testing.T) {
 }
 
 func TestPrefixes(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		prefixes []string
@@ -750,6 +793,7 @@ func TestPrefixes(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			l, err := New(WithPrefixes(tc.prefixes...), WithResolver(testResolver))
 			require.NoError(t, err)
 
@@ -762,6 +806,7 @@ func TestPrefixes(t *testing.T) {
 }
 
 func TestExpiredStateDropped(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		l := newLimiter(t)
 
@@ -791,6 +836,7 @@ func TestExpiredStateDropped(t *testing.T) {
 }
 
 func TestSweepOnlyWhenDue(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		l := newLimiter(t)
 		assert.True(t, dueAt(l).IsZero(), "nothing tracked, nothing due")
@@ -823,6 +869,7 @@ func TestSweepOnlyWhenDue(t *testing.T) {
 }
 
 func TestSweepMany(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		n := 10_000
 		l := newLimiter(t)
@@ -843,6 +890,7 @@ func TestSweepMany(t *testing.T) {
 }
 
 func TestOneTidyAtATime(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		l := newLimiter(t)
 		l.Check(ctx, "abc", rateCaps("5/1s"))
@@ -862,6 +910,7 @@ func TestOneTidyAtATime(t *testing.T) {
 }
 
 func TestConcurrentChecksWhileSweeping(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		l := newLimiter(t)
 		var wg sync.WaitGroup
@@ -883,6 +932,7 @@ func TestConcurrentChecksWhileSweeping(t *testing.T) {
 }
 
 func TestForgottenWhileLookedUp(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		l := newLimiter(t)
 		caps := rateCaps("1/1h")
@@ -906,6 +956,7 @@ func TestForgottenWhileLookedUp(t *testing.T) {
 }
 
 func TestCallerExpiry(t *testing.T) {
+	t.Parallel()
 	now := time.Unix(1_700_000_000, 0)
 	c := &caller{allowances: map[Rate]*allowance{
 		{Count: 5, Window: time.Minute}: {seen: now, tat: now.Add(time.Hour)},
@@ -920,6 +971,7 @@ func TestCallerExpiry(t *testing.T) {
 }
 
 func TestConcurrentNeverExceedsBurst(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		l := newLimiter(t)
 		caps := rateCaps("50/1s", "200/1m")

@@ -10,6 +10,7 @@ import (
 )
 
 func TestWarningString(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		w    Warning
@@ -34,12 +35,14 @@ func TestWarningString(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			assert.Equal(t, tc.want, tc.w.String())
 		})
 	}
 }
 
 func TestReasonString(t *testing.T) {
+	t.Parallel()
 	assert.Equal(t, "none", None.String())
 	assert.Equal(t, "rate-exceeded", RateExceeded.String())
 	assert.Equal(t, "denied", Denied.String())

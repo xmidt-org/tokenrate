@@ -16,6 +16,7 @@ import (
 )
 
 func TestParseRate(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		in   string
 		want Rate
@@ -30,6 +31,7 @@ func TestParseRate(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
 			got, err := ParseRate(tc.in)
 			require.NoError(t, err)
 			tc.want.text = tc.in
@@ -40,6 +42,7 @@ func TestParseRate(t *testing.T) {
 }
 
 func TestParseRateMalformed(t *testing.T) {
+	t.Parallel()
 	tests := []string{
 		"",
 		"10",
@@ -66,6 +69,7 @@ func TestParseRateMalformed(t *testing.T) {
 
 	for _, in := range tests {
 		t.Run(in, func(t *testing.T) {
+			t.Parallel()
 			r, err := ParseRate(in)
 			assert.ErrorIs(t, err, ErrMalformedRate)
 			assert.Equal(t, Rate{text: in}, r, "the text is kept")
@@ -78,6 +82,7 @@ func TestParseRateMalformed(t *testing.T) {
 // TestRateString covers Rates built in code, which have no text to echo
 // unless given one.
 func TestRateString(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		rate Rate
 		want string
@@ -94,6 +99,7 @@ func TestRateString(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.want, func(t *testing.T) {
+			t.Parallel()
 			assert.Equal(t, tc.want, tc.rate.String())
 			if tc.rate.text == "" && !tc.rate.IsZero() {
 				parsed, err := ParseRate(tc.want)
@@ -105,6 +111,7 @@ func TestRateString(t *testing.T) {
 }
 
 func TestCompareRates(t *testing.T) {
+	t.Parallel()
 	r := func(s string) Rate {
 		rate, err := ParseRate(s)
 		require.NoError(t, err)
@@ -123,6 +130,7 @@ func TestCompareRates(t *testing.T) {
 // TestInvalidRates covers Rates built directly rather than parsed, where one
 // field may be bad on its own.  Each is treated like the zero Rate.
 func TestInvalidRates(t *testing.T) {
+	t.Parallel()
 	valid := Rate{Count: 1, Window: time.Second}
 
 	tests := []struct {
@@ -141,6 +149,7 @@ func TestInvalidRates(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			assert.False(t, tc.rate.valid())
 			assert.Equal(t, tc.str, tc.rate.String())
 
@@ -164,6 +173,7 @@ func TestInvalidRates(t *testing.T) {
 }
 
 func TestRateRescale(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		rate   Rate
@@ -184,6 +194,7 @@ func TestRateRescale(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			assert.Equal(t, tc.want, tc.rate.rescale(tc.window))
 		})
 	}

@@ -39,6 +39,7 @@ func newRequest(principal string, caps ...string) *http.Request {
 }
 
 func TestMiddleware(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		l := newLimiter(t)
 
@@ -87,6 +88,7 @@ func TestMiddleware(t *testing.T) {
 }
 
 func TestMiddlewareOmitWarnings(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		var observed Decision
 		h := Middleware{
@@ -105,6 +107,7 @@ func TestMiddlewareOmitWarnings(t *testing.T) {
 }
 
 func TestMiddlewareDenied(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		denied := errors.New("a rate is required")
 		l := newLimiter(t, WithResolver(func(_ context.Context, _ string, provided []Rate) ([]Rate, error) {
@@ -135,6 +138,7 @@ func TestMiddlewareDenied(t *testing.T) {
 }
 
 func TestMiddlewareMisconfigured(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		l := newLimiter(t)
 		next := http.NotFoundHandler()
@@ -150,6 +154,7 @@ func TestMiddlewareMisconfigured(t *testing.T) {
 }
 
 func TestRetryAfterSeconds(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		d    time.Duration
 		want string
@@ -163,6 +168,7 @@ func TestRetryAfterSeconds(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.d.String(), func(t *testing.T) {
+			t.Parallel()
 			assert.Equal(t, tc.want, retryAfterSeconds(tc.d))
 		})
 	}

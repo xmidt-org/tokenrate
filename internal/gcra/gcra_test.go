@@ -11,6 +11,7 @@ import (
 )
 
 func TestSpendBurstThenRefill(t *testing.T) {
+	t.Parallel()
 	now := time.Unix(1000, 0)
 	var tat time.Time
 
@@ -35,6 +36,7 @@ func TestSpendBurstThenRefill(t *testing.T) {
 }
 
 func TestSpendPastTAT(t *testing.T) {
+	t.Parallel()
 	now := time.Unix(1000, 0)
 	tat := now.Add(-time.Hour)
 
@@ -44,6 +46,7 @@ func TestSpendPastTAT(t *testing.T) {
 }
 
 func TestInterval(t *testing.T) {
+	t.Parallel()
 	assert.Equal(t, 200*time.Millisecond, Interval(5, time.Second))
 	assert.Equal(t, time.Duration(1), Interval(1_000_000_000_000, time.Second))
 }
