@@ -89,7 +89,7 @@ func callerOf(l *Limiter, principal string) *caller {
 // no Caller is tracked.
 func dueAt(l *Limiter) time.Time {
 	if n := l.due.Load(); n != noneDue {
-		return time.Unix(0, n)
+		return l.start.Add(time.Duration(n))
 	}
 
 	return time.Time{}
@@ -97,8 +97,8 @@ func dueAt(l *Limiter) time.Time {
 
 // sweptAt returns when the Limiter was last swept, or the zero time.
 func sweptAt(l *Limiter) time.Time {
-	if n := l.swept.Load(); n != 0 {
-		return time.Unix(0, n)
+	if n := l.swept.Load(); n != neverSwept {
+		return l.start.Add(time.Duration(n))
 	}
 
 	return time.Time{}

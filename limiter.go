@@ -63,12 +63,17 @@ type Limiter struct {
 	// a Caller takes no lock; checking one locks only that Caller.
 	callers sync.Map // of string to *caller
 
-	// due is the earliest a Caller may expire, in Unix nanoseconds, or
-	// noneDue if there are none.  No Caller expires before it, though one
+	// start is when the Limiter was made.  due and swept are nanoseconds
+	// after it, so they follow the monotonic clock, as every other time
+	// here does, and a wall clock step cannot move them.
+	start time.Time
+
+	// due is the earliest a Caller may expire, after start, or noneDue if
+	// there are none.  No Caller expires before it, though one
 	// may last longer.
 	due atomic.Int64
 
-	// swept is when the Limiter was last swept, in Unix nanoseconds.
+	// swept is when the Limiter was last swept, after start, or neverSwept.
 	swept atomic.Int64
 
 	// sweeping is whether a sweep goroutine is running.
@@ -77,6 +82,9 @@ type Limiter struct {
 
 // noneDue is Limiter.due when no Caller is tracked: no time reaches it.
 const noneDue = math.MaxInt64
+
+// neverSwept is Limiter.swept before the first sweep.
+const neverSwept = math.MinInt64
 
 // New creates a Limiter.  WithPrefixes is required.
 func New(opts ...Option) (*Limiter, error) {
@@ -103,7 +111,9 @@ func New(opts ...Option) (*Limiter, error) {
 		return nil, err
 	}
 
+	l.start = time.Now()
 	l.due.Store(noneDue)
+	l.swept.Store(neverSwept)
 	return &l, nil
 }
 
@@ -282,17 +292,28 @@ func (l *Limiter) forget(c *caller) {
 	}
 }
 
+// since returns t as nanoseconds after start, measured on the monotonic
+// clock, for due and swept.
+func (l *Limiter) since(t time.Time) int64 {
+	return int64(t.Sub(l.start))
+}
+
 // isDue reports whether a Caller may have expired, at least minSweepGap
 // after the last sweep.  On most checks it is not, and costs two atomic
 // loads.
 func (l *Limiter) isDue(now time.Time) bool {
-	n := now.UnixNano()
-	return n >= l.due.Load() && n-l.swept.Load() >= int64(minSweepGap)
+	n := l.since(now)
+	if n < l.due.Load() {
+		return false
+	}
+
+	swept := l.swept.Load()
+	return swept == neverSwept || n-swept >= int64(minSweepGap)
 }
 
 // expect notes that a Caller expires at t.
 func (l *Limiter) expect(t time.Time) {
-	n := t.UnixNano()
+	n := l.since(t)
 	for {
 		due := l.due.Load()
 		if n >= due || l.due.CompareAndSwap(due, n) {
@@ -319,7 +340,7 @@ func (l *Limiter) sweep() {
 
 	// Callers added from here on note their own expiry, and the sweep notes
 	// the rest.
-	l.swept.Store(now.UnixNano())
+	l.swept.Store(l.since(now))
 	l.due.Store(noneDue)
 	l.callers.Range(func(_, v any) bool {
 		c := v.(*caller)
