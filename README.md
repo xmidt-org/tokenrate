@@ -98,6 +98,30 @@ See the
 [examples](https://pkg.go.dev/github.com/xmidt-org/tokenrate#pkg-examples)
 for all three.
 
+## Try it
+
+`examples/server` is a small service limited by tokenrate, with a table of
+API keys standing in for credential validation, and `examples/client` makes
+a burst of requests and prints each answer. Both are standard library only.
+
+```sh
+go run ./examples/server
+```
+
+```sh
+$ go run ./examples/client -key key-abc -n 7
+ 1  200 OK
+ 2  200 OK
+ 3  200 OK
+ 4  200 OK
+ 5  200 OK
+ 6  429 Too Many Requests  Retry-After: 12s
+ 7  429 Too Many Requests  Retry-After: 12s
+```
+
+`key-ghi` carries a malformed rate alongside a valid one, so every answer
+carries a warning; `key-def` carries no rate and is Unrestricted.
+
 - [CONTEXT.md](CONTEXT.md) defines the terms.
 - [docs/design.md](docs/design.md) describes the behavior.
 - [ADR 0002](docs/adr/0002-caller-is-held-to-every-rate.md) explains why
