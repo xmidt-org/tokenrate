@@ -5,6 +5,7 @@ package tokenrate
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"slices"
 	"testing"
@@ -156,6 +157,7 @@ func TestInvalidRates(t *testing.T) {
 			} else {
 				assert.Equal(t, Denied, d.Reason)
 				assert.ErrorIs(t, d.Err, ErrInvalidRate)
+				assert.EqualError(t, d.Err, fmt.Sprintf("resolver returned an invalid rate: count %d, window %s", tc.rate.Count, tc.rate.Window))
 			}
 		})
 	}

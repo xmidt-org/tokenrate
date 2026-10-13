@@ -186,7 +186,7 @@ func (l *Limiter) resolveRates(ctx context.Context, principal string, provided [
 	var rates []Rate
 	for _, r := range resolved {
 		if !r.valid() && !r.IsZero() {
-			return nil, fmt.Errorf("%w: %+v", ErrInvalidRate, r)
+			return nil, fmt.Errorf("%w: count %d, window %s", ErrInvalidRate, r.Count, r.Window)
 		}
 
 		rates = addRates(rates, r)
