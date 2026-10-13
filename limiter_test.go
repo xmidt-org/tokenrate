@@ -888,14 +888,19 @@ func TestForgottenWhileLookedUp(t *testing.T) {
 		caps := rateCaps("1/1h")
 		assert.True(t, l.Check(ctx, "abc", caps).Allowed)
 
-		// As if the sweep forgot abc between a check's lookup and its lock:
-		// the check holds the old state, which is no longer in callers.
+		// A check looks abc up, and the sweep forgets them before the check
+		// locks them: the check holds state that is no longer in callers.
 		old := callerOf(l, "abc")
 		old.mu.Lock()
 		l.forget(old)
 		old.mu.Unlock()
 
-		assert.True(t, l.Check(ctx, "abc", caps).Allowed, "the check gets fresh state, not the forgotten one")
+		var d Decision
+		assert.False(t, l.check(old, false, rates(t, "1/1h"), time.Now(), &d), "the check must look again")
+		assert.Equal(t, Decision{}, d, "and decided nothing")
+
+		// Looking again finds fresh state.
+		assert.True(t, l.Check(ctx, "abc", caps).Allowed)
 		assert.NotSame(t, old, callerOf(l, "abc"))
 	})
 }

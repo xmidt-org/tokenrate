@@ -143,28 +143,36 @@ func (l *Limiter) Check(ctx context.Context, principal string, capabilities []st
 
 	for {
 		c, added := l.get(principal)
-
-		c.mu.Lock()
-		if c.forgotten {
-			// Forgotten since it was looked up, so it is no longer in
-			// callers: look again.
-			c.mu.Unlock()
-			continue
+		if l.check(c, added, token, now, &d) {
+			return d
 		}
-
-		c.remember(token, now)
-		c.prune(now)
-		l.spend(c, c.applied(now), now, &d)
-
-		// Using a Caller only makes their state last longer, so only a new
-		// one can bring the next sweep forward.
-		if added {
-			l.expect(c.expiry())
-		}
-
-		c.mu.Unlock()
-		return d
 	}
+}
+
+// check judges the request against c, the state found for its Caller, and
+// reports whether it did.  It reports false, having touched nothing, if c
+// was forgotten since it was looked up: c is then no longer in callers, so
+// the Caller must be looked up again.  added says whether the lookup created
+// c.
+func (l *Limiter) check(c *caller, added bool, token []Rate, now time.Time, d *Decision) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.forgotten {
+		return false
+	}
+
+	c.remember(token, now)
+	c.prune(now)
+	l.spend(c, c.applied(now), now, d)
+
+	// Using a Caller only makes their state last longer, so only a new one
+	// can bring the next sweep forward.
+	if added {
+		l.expect(c.expiry())
+	}
+
+	return true
 }
 
 // resolveRates asks the Resolver what rates the Token counts as carrying,
@@ -301,16 +309,13 @@ func (l *Limiter) startTidy() {
 	}
 }
 
-// tidy sweeps the Limiter if it is due, then exits.  It drops every Caller
-// whose state no longer carries information, and notes when the rest expire.
-// It locks one Caller at a time, so checks carry on while it works.
+// tidy sweeps the Limiter, then exits.  It drops every Caller whose state
+// no longer carries information, and notes when the rest expire.  It locks
+// one Caller at a time, so checks carry on while it works.
 func (l *Limiter) tidy() {
 	defer l.tidying.Store(false)
 
 	now := time.Now()
-	if !l.isDue(now) {
-		return
-	}
 
 	// Callers added from here on note their own expiry, and the sweep notes
 	// the rest.
