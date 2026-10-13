@@ -12,7 +12,7 @@ tokenrate used to bound how many Callers it tracked (`WithMaxCallers`). When a n
 
 That makes the bound a way around the limit. Anyone able to present Tokens for enough principals can push the Limiter past it, and every new principal then hands some other Caller, possibly one of their own, a fresh allowance. Legitimate traffic that reaches the bound does the same by accident, silently.
 
-Now there is no bound. A Caller's state is kept until it expires, twice the longest window after their last request, which is at most 48 hours under `DefaultResolver`'s Window Bounds. Only Callers whose Token carries a rate have state, so filling memory takes validly issued Tokens for a great many principals, which is a problem with the issuer, not one a rate limiter can solve.
+Now there is no bound. A Caller's state is kept until it expires, twice the longest window after their last request, which is at most 48 hours under `DefaultResolver`'s Window Bounds. Only Callers whose Token carries a rate have state, so filling memory takes validly issued Tokens for a great many principals, which is a problem with the issuer, not one a rate limiter can solve. This assumes the limiter runs only after credentials are validated, so the principal is never the client's to choose; the package and `Middleware` docs say so.
 
 ## Considered Options
 

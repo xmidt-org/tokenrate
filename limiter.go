@@ -9,6 +9,10 @@
 // Middleware do so, and applies the Decision it gets back.  A Resolver lets
 // the service adjust the rates first, for ceilings, overrides and the like.
 // See CONTEXT.md for the terms used here and docs/design.md for the behavior.
+//
+// Check must run only after the request's credentials have been validated.
+// The Limiter keeps state per principal, so an attacker who can choose the
+// principal could fill memory with one request per name.
 package tokenrate
 
 import (

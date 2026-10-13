@@ -22,9 +22,10 @@ A Token may carry several, such as `1000/1m` and `100000/24h`, and every
 one applies. A deployment's own policy, such as a ceiling for everyone or
 an override for one Caller, is a function it supplies with `WithResolver`.
 
-tokenrate has no dependency on bascule, HTTP or JWT libraries. A service
-passes in the principal and capability strings after authenticating a
-request, and decides how to apply the decision it gets back.
+tokenrate depends on nothing beyond the standard library: no bascule, no
+JWT library, no HTTP framework. A service passes in the principal and
+capability strings after authenticating a request, and decides how to apply
+the decision it gets back.
 
 ## Install
 
@@ -34,7 +35,10 @@ go get github.com/xmidt-org/tokenrate
 
 ## Usage
 
-Place the middleware after the one that authenticates the request. It
+Place the middleware after the one that validates the request's
+credentials. It must never run before: the limiter keeps state per
+principal, so an unauthenticated caller who could choose the principal
+could fill memory with one request per name. It
 checks the Caller, writes one warning header per Capability Warning, and
 answers 429 Too Many Requests (with Retry-After) or 403 Forbidden itself.
 The only service-specific part is finding the principal and capabilities in
@@ -72,8 +76,8 @@ the `Decision` yourself.
 A `Resolver` has the final say over the rates a Token counts as carrying,
 so policy lives in your code, not in options. The library always enforces
 what it returns: no rates means no limit, the zero rate refuses, and an
-error denies the request. `DefaultResolver` only handles malformed rates;
-call it from yours to keep that.
+error denies the request. `DefaultResolver` handles malformed rates and
+the Window Bounds; call it from yours to keep that.
 
 ```go
 tokenrate.WithResolver(func(ctx context.Context, principal string, provided []tokenrate.Rate) ([]tokenrate.Rate, error) {

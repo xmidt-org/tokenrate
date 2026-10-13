@@ -8,8 +8,9 @@ SPDX-License-Identifier: Apache-2.0
 > **Status:** implemented. Terms are defined in
 > [CONTEXT.md](../CONTEXT.md); the key decisions are in
 > [ADR 0001](adr/0001-caller-rate-is-largest-remembered.md),
-> [ADR 0002](adr/0002-caller-is-held-to-every-rate.md) and
-> [ADR 0003](adr/0003-resolver-decides-policy.md).
+> [ADR 0002](adr/0002-caller-is-held-to-every-rate.md),
+> [ADR 0003](adr/0003-resolver-decides-policy.md) and
+> [ADR 0004](adr/0004-no-cap-on-callers.md).
 
 tokenrate is a standalone Go library (`github.com/xmidt-org/tokenrate`)
 that limits how fast each Caller may make requests. Both **who** is limited
@@ -137,7 +138,7 @@ so a refusal by one leaves the others untouched.
   only for other checks of the same Caller. A Caller forgotten between a
   check's lookup and its lock is marked so, and the check looks again.
 
-## Suggested API
+## API
 
 ```go
 package tokenrate
@@ -153,8 +154,9 @@ func WithResolver(r Resolver) Option                  // the final say over a To
 // Capabilities arrive as zero Rates.
 type Resolver func(ctx context.Context, principal string, provided []Rate) ([]Rate, error)
 
-// DefaultResolver ignores malformed rates beside valid ones, and holds a
-// Token whose rates are all malformed to zero.
+// DefaultResolver ignores malformed rates beside valid ones, holds a Token
+// whose rates are all malformed to zero, and rescales valid rates into the
+// Window Bounds.
 func DefaultResolver(ctx context.Context, principal string, provided []Rate) ([]Rate, error)
 
 // Check decides one request and spends from the Caller's allowances.
@@ -213,8 +215,10 @@ character, so it is quoted.
 ## Integrating
 
 `Middleware` does the HTTP glue, so every service applies a Decision the
-same way. It is placed **after** the authentication middleware, and the
-service supplies only the `Extractor`. For tr1d1um that is bascule:
+same way. It is placed **after** the middleware that validates credentials,
+never before: the limiter keeps state per principal, so an unauthenticated
+caller who could choose the principal could fill memory with one request
+per name. The service supplies only the `Extractor`, here with bascule:
 
 ```go
 handler := tokenrate.Middleware{

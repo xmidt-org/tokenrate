@@ -60,9 +60,9 @@ func WithPrefixes(prefixes ...string) Option {
 //   - Vouching for a Caller whose Token has no rate: return rates for it.
 //   - Blocking a Caller: return an error.
 //
-// A Resolver that wants DefaultResolver's handling of malformed rates and
-// Window Bounds calls it first and adjusts its result.  Returning a rate that is neither valid
-// nor zero denies the request with ErrInvalidRate.
+// The Limiter keeps state for every principal the Resolver returns rates for.
+// Returning a rate that is neither valid nor zero denies the request with
+// ErrInvalidRate.
 type Resolver func(ctx context.Context, principal string, provided []Rate) ([]Rate, error)
 
 // DefaultResolver is the Resolver unless WithResolver says otherwise.  It

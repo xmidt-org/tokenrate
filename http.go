@@ -15,21 +15,24 @@ const DefaultWarningHeader = "X-Webpa-Capability-Warning"
 
 // Extractor returns the principal and capabilities of an authenticated
 // request, however the service stores them, e.g. from the Token in the
-// request's context.  Returning an empty principal and no capabilities for an
-// unauthenticated request leaves it Unrestricted, unless the Resolver returns
-// rates for it or denies it.
+// request's context.  The principal must come from validated credentials,
+// never from anything the client can choose freely.  Returning an empty
+// principal and no capabilities for an unauthenticated request leaves it
+// Unrestricted, unless the Resolver returns rates for it or denies it.
 type Extractor func(*http.Request) (principal string, capabilities []string)
 
 // Middleware applies a Limiter to HTTP requests.  Place it after the
-// middleware that authenticates the request, since it needs the Token's
-// principal and capabilities.
+// middleware that validates the request's credentials.  It needs the Token's
+// principal and capabilities, and the Limiter keeps state per principal, so
+// running it before authentication would let an attacker fill memory with
+// one request per made-up principal.
 //
 // For each request it checks the Caller and, unless OmitWarnings is set, adds
 // one WarningHeader per Capability Warning, whether or not the request goes
-// on.  An allowed request
-// is passed to the next handler.  A rejected one gets 429 Too Many Requests,
-// with Retry-After when waiting would help, or 403 Forbidden when the
-// Resolver denied it, which Observe can log from Decision.Err.
+// on.  An allowed request is passed to the next handler.  A rejected one gets
+// 429 Too Many Requests, with Retry-After when waiting would help, or 403
+// Forbidden when the Resolver denied it, which Observe can log from
+// Decision.Err.
 type Middleware struct {
 	// Limiter decides each request.  Required.
 	Limiter *Limiter
