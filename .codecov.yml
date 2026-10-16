@@ -9,6 +9,7 @@ coverage:
 ignore:
   - "*_test.go"
   - "vendor"
+  - "examples"
 
 fixes:
   - "github.com/xmidt-org/tokenrate/::"
